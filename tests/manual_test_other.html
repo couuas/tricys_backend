@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Tricys Stage 3 (Other) Manual Test</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+
+        .card {
+            border: 1px solid #ccc;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-radius: 4px;
+        }
+
+        button {
+            cursor: pointer;
+            padding: 0.5rem 1rem;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+
+        .success {
+            color: green;
+        }
+
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Stage 3 (Other): Spec Compliance Manual Test</h1>
+
+    <!-- Health Check -->
+    <div class="card">
+        <h3>1. System Health Check</h3>
+        <button onclick="checkHealth()">GET /health</button>
+        <pre id="healthOutput">Waiting...</pre>
+    </div>
+
+    <!-- Config Template -->
+    <div class="card">
+        <h3>2. Get Config Template</h3>
+        <button onclick="getConfigTemplate()">GET /config/template</button>
+        <pre id="templateOutput">Waiting...</pre>
+    </div>
+
+    <!-- Delete Task -->
+    <div class="card">
+        <h3>3. Delete Task</h3>
+        <input type="text" id="deleteTaskId" placeholder="Task ID (e.g. 550e...)" style="width: 300px;">
+        <label>
+            <input type="checkbox" id="cleanupFiles" checked> Cleanup Files?
+        </label>
+        <button onclick="deleteTask()">DELETE /tasks/{id}</button>
+        <pre id="deleteOutput">Waiting...</pre>
+    </div>
+
+    <!-- Multi-Job Query -->
+    <div class="card">
+        <h3>4. Multi-Job Query</h3>
+        <input type="text" id="queryTaskId" placeholder="Task ID (e.g. 550e...)" style="width: 300px;">
+        <input type="text" id="queryJobIds" placeholder="Job IDs (e.g. 1,5,10)" value="1,2">
+        <input type="text" id="queryVars" placeholder="Variables (comma sep)" value="time,sds.inventory">
+        <button onclick="queryMultiJob()">POST /results/{id}/query</button>
+        <pre id="queryOutput">Waiting...</pre>
+    </div>
+
+    <!-- List Tasks -->
+    <div class="card">
+        <h3>5. List Tasks</h3>
+        <input type="text" id="listStatus" placeholder="Status (PENDING, RUNNING, COMPLETED, FAILED)">
+        <input type="number" id="listLimit" placeholder="Limit" value="10" style="width: 80px;">
+        <input type="number" id="listOffset" placeholder="Offset" value="0" style="width: 80px;">
+        <button onclick="listTasks()">GET /tasks</button>
+        <pre id="listOutput">Waiting...</pre>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000/api/v1";
+
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/health`);
+                const data = await res.json();
+                document.getElementById('healthOutput').textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                document.getElementById('healthOutput').textContent = e.toString();
+            }
+        }
+
+        async function getConfigTemplate() {
+            try {
+                const res = await fetch(`${API_BASE}/config/template`);
+                const data = await res.json();
+                document.getElementById('templateOutput').textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                document.getElementById('templateOutput').textContent = e.toString();
+            }
+        }
+
+        async function deleteTask() {
+            const id = document.getElementById('deleteTaskId').value;
+            if (!id) return alert("Enter Task ID");
+            const cleanup = document.getElementById('cleanupFiles').checked;
+
+            try {
+                const res = await fetch(`${API_BASE}/tasks/${id}?cleanup_files=${cleanup}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                document.getElementById('deleteOutput').textContent =
+                    `Status: ${res.status}\nBody: ${JSON.stringify(data, null, 2)}`;
+            } catch (e) {
+                document.getElementById('deleteOutput').textContent = e.toString();
+            }
+        }
+
+        async function queryMultiJob() {
+            const id = document.getElementById('queryTaskId').value;
+            const jobIdsStr = document.getElementById('queryJobIds').value;
+            const varsStr = document.getElementById('queryVars').value;
+
+            if (!id) return alert("Enter Task ID");
+
+            const jobIds = jobIdsStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+            const variables = varsStr.split(',').map(s => s.trim()).filter(s => s);
+
+            try {
+                const res = await fetch(`${API_BASE}/results/${id}/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        variables: variables,
+                        job_ids: jobIds
+                    })
+                });
+                const data = await res.json();
+                document.getElementById('queryOutput').textContent =
+                    `Status: ${res.status}\nBody: ${JSON.stringify(data, null, 2)}`;
+            } catch (e) {
+                document.getElementById('queryOutput').textContent = e.toString();
+            }
+        }
+
+        async function listTasks() {
+            const status = document.getElementById('listStatus').value;
+            const limit = document.getElementById('listLimit').value;
+            const offset = document.getElementById('listOffset').value;
+
+            let url = `${API_BASE}/tasks?limit=${limit}&offset=${offset}`;
+            if (status) url += `&status=${status}`;
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                document.getElementById('listOutput').textContent =
+                    `Status: ${res.status}\nBody: ${JSON.stringify(data, null, 2)}`;
+            } catch (e) {
+                document.getElementById('listOutput').textContent = e.toString();
+            }
+        }
+    </script>
+</body>
+
+</html>

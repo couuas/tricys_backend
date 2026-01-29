@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tricys Stage 1 Manual Test</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding: 20px;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+
+        .box {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            margin-top: 0;
+            color: #34495e;
+        }
+
+        pre {
+            background: #282c34;
+            color: #abb2bf;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            max-height: 300px;
+        }
+
+        .btn {
+            padding: 10px 15px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+
+        .btn:hover {
+            background-color: #2980b9;
+        }
+
+        .btn-poll {
+            background-color: #2ecc71;
+        }
+
+        .btn-poll:hover {
+            background-color: #27ae60;
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+
+        .status-pending { background-color: #f1c40f; color: #fff; }
+        .status-running { background-color: #3498db; color: #fff; }
+        .status-completed { background-color: #2ecc71; color: #fff; }
+        .status-failed { background-color: #e74c3c; color: #fff; }
+    </style>
+</head>
+
+<body>
+    <h1>Tricys Backend Stage 1 Tester</h1>
+
+    <div class="box">
+        <h3>1. Submit Simulation Task</h3>
+        <p>This will create a basic simulation task with default configuration.</p>
+        <button class="btn" onclick="submitTask()">POST /tasks (Submit Task)</button>
+        <div id="submitResult">
+            <p>Result will appear here...</p>
+        </div>
+    </div>
+
+    <div class="box">
+        <h3>2. Poll Task Status</h3>
+        <div class="input-group">
+            <label for="taskId">Task ID:</label>
+            <input type="text" id="taskId" placeholder="Enter Task ID from step 1">
+        </div>
+        <button class="btn btn-poll" onclick="pollStatus()">GET /tasks/{id} (Poll Status)</button>
+        <div id="pollResult">
+            <p>Status will appear here...</p>
+        </div>
+    </div>
+
+    <div class="box">
+        <h3>3. Check Results (Reference)</h3>
+        <p>Once completed, you can manually check the workspace path returned in the status response.</p>
+        <div id="workspaceDir"></div>
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000/api/v1";
+
+        async function submitTask() {
+            const submitResultDiv = document.getElementById('submitResult');
+            submitResultDiv.innerHTML = "<p>Submitting...</p>";
+
+            const simulation_config = {
+                "paths": {
+                    "package_path": "D:\\Administrator\\Documents\\Github\\tricys\\example\\example_model_single\\example_model.mo"
+                },
+                "simulation": {
+                    "model_name": "example_model.Cycle",
+                    "variableFilter": "time|sds.I[1]",
+                    "stop_time": 2000.0,
+                    "step_size": 0.5
+                }
+            };
+
+            const payload = {
+                "type": "BASIC",
+                "name": "Manual Test Run Stage 1",
+                "config_json": simulation_config
+            };
+
+            try {
+                const response = await fetch(`${API_URL}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                
+                const data = await response.json();
+                submitResultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                
+                if (data.id) {
+                    document.getElementById('taskId').value = data.id;
+                }
+            } catch (error) {
+                submitResultDiv.innerHTML = `<p style="color: red;">Error: ${error.message}</p>`;
+            }
+        }
+
+        async function pollStatus() {
+            const taskId = document.getElementById('taskId').value;
+            const pollResultDiv = document.getElementById('pollResult');
+            
+            if (!taskId) {
+                alert("Please enter a Task ID");
+                return;
+            }
+
+            pollResultDiv.innerHTML = "<p>Polling...</p>";
+
+            try {
+                const response = await fetch(`${API_URL}/tasks/${taskId}`);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                
+                const data = await response.json();
+                
+                let statusClass = "status-pending";
+                if (data.status === "RUNNING") statusClass = "status-running";
+                if (data.status === "COMPLETED") statusClass = "status-completed";
+                if (data.status === "FAILED") statusClass = "status-failed";
+
+                pollResultDiv.innerHTML = `
+                    <p>Current Status: <span class="status-badge ${statusClass}">${data.status}</span></p>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+
+                if (data.workspace_path) {
+                    document.getElementById('workspaceDir').innerHTML = `
+                        <p><strong>Workspace:</strong> <code>${data.workspace_path}</code></p>
+                    `;
+                }
+            } catch (error) {
+                pollResultDiv.innerHTML = `<p style="color: red;">Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+
+</html>

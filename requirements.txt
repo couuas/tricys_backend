@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+pydantic-settings
+pandas
+tables
+python-multipart
+psutil
+pytest
+pytest-asyncio
+httpx
+websockets

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tricys Stage 3 Manual Test</title>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+        }
+
+        .box {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 20px;
+        }
+
+        #logs {
+            background: #f0f0f0;
+            height: 200px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+            padding: 10px;
+            border: 1px solid #999;
+        }
+
+        .btn {
+            padding: 5px 10px;
+            cursor: pointer;
+            margin-right: 5px;
+        }
+
+        .input-group {
+            margin-bottom: 10px;
+        }
+
+        input {
+            width: 300px;
+            padding: 3px;
+        }
+
+        .red {
+            color: red;
+        }
+
+        .green {
+            color: green;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tricys Backend Stage 3 Tester</h1>
+
+    <!-- SECTION 1: CREATE TASK -->
+    <div class="box">
+        <h3>1. Create Task</h3>
+        <p>Creates a task to generate data for testing query/archive.</p>
+        <button class="btn" onclick="createTask('enhanced')">Create Enhanced Task (HDF5)</button>
+        <button class="btn" onclick="createTask('basic')">Create Basic Task (CSV)</button>
+        <button class="btn red" onclick="createInvalidTask()">Create Invalid Task (Validation Test)</button>
+        <div id="createResult"></div>
+    </div>
+
+    <!-- SECTION 2: MONITOR (Simplified) -->
+    <div class="box">
+        <h3>2. Monitor Task</h3>
+        Task ID: <input type="text" id="taskId">
+        <button class="btn" onclick="connectWS()">Connect WebSocket</button>
+        <div id="wsStatus">Status: Disconnected</div>
+        <div id="logs">Waiting for logs...</div>
+    </div>
+
+    <!-- SECTION 3: DATA SERVICES -->
+    <div class="box">
+        <h3>3. Data Query API</h3>
+        <div class="input-group">
+            Variables (comma sep): <input type="text" id="queryVars" value="tep_fep.to_SDS_Fraction[1],sds.I[1]">
+        </div>
+        <div class="input-group">
+            Time Start: <input type="text" id="timeStart" value="0.0" style="width: 80px;">
+            End: <input type="text" id="timeEnd" value="10.0" style="width: 80px;">
+        </div>
+        <button class="btn" onclick="queryData()">POST /results/{id}/query</button>
+        <div id="queryResult"></div>
+    </div>
+
+    <!-- SECTION 4: ARCHIVE -->
+    <div class="box">
+        <h3>4. Archive & Download</h3>
+        <button class="btn" onclick="downloadArchive()">GET /results/{id}/download</button>
+        <div id="downloadResult"></div>
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000/api/v1";
+        const WS_URL = "ws://localhost:8000/api/v1";
+        let ws = null;
+
+        async function createTask(mode) {
+            let config = {
+                "paths": {
+                    "package_path": "D:\\Administrator\\Documents\\Github\\tricys\\example\\example_model_single\\example_model.mo"
+                },
+                "simulation": {
+                    "model_name": "example_model.Cycle",
+                    "variableFilter": "time|sds.I[1]|tep_fep.to_SDS_Fraction[1]",
+                    "stop_time": 100.0,
+                    "step_size": 1.0,
+                    "concurrent": mode === 'enhanced',
+                    "execute_mode": mode === 'enhanced' ? 'enhanced' : 'standard'
+                },
+                "simulation_parameters": {
+                    "tep_fep.to_SDS_Fraction[1]": [0.1, 0.5, 0.9]
+                }
+            };
+
+            try {
+                const res = await fetch(`${API_URL}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: "BASIC",
+                        enhanced: mode === 'enhanced',
+                        config_json: config
+                    })
+                });
+                const data = await res.json();
+                document.getElementById('createResult').innerText = JSON.stringify(data, null, 2);
+                if (data.id) {
+                    document.getElementById('taskId').value = data.id;
+                }
+            } catch (e) {
+                document.getElementById('createResult').innerText = "Error: " + e;
+            }
+        }
+
+        async function createInvalidTask() {
+            try {
+                const res = await fetch(`${API_URL}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: "BASIC",
+                        config_json: {} // Empty config should trigger 422/ValueError
+                    })
+                });
+
+                let text;
+                try {
+                    const data = await res.json();
+                    text = JSON.stringify(data, null, 2);
+                } catch {
+                    text = res.statusText;
+                }
+
+                document.getElementById('createResult').innerText = `Status: ${res.status}\n${text}`;
+            } catch (e) {
+                document.getElementById('createResult').innerText = "Error: " + e;
+            }
+        }
+
+        function connectWS() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert("Enter Task ID");
+            if (ws) ws.close();
+
+            ws = new WebSocket(`${WS_URL}/ws/tasks/${taskId}`);
+            ws.onopen = () => {
+                document.getElementById('wsStatus').innerText = "Status: Connected";
+                document.getElementById('wsStatus').className = "green";
+            };
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'log') {
+                    const logs = document.getElementById('logs');
+                    logs.innerText += msg.data;
+                    logs.scrollTop = logs.scrollHeight;
+                }
+            };
+        }
+
+        async function queryData() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert("Enter Task ID");
+
+            const vars = document.getElementById('queryVars').value.split(',').map(s => s.trim()).filter(s => s);
+            const start = parseFloat(document.getElementById('timeStart').value);
+            const end = parseFloat(document.getElementById('timeEnd').value);
+
+            try {
+                const res = await fetch(`${API_URL}/results/${taskId}/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        variables: vars,
+                        time_range: [start, end]
+                    })
+                });
+                const data = await res.json();
+                document.getElementById('queryResult').innerText = JSON.stringify(data, null, 2);
+            } catch (e) {
+                document.getElementById('queryResult').innerText = "Error: " + e;
+            }
+        }
+
+        function downloadArchive() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert("Enter Task ID");
+
+            window.location.href = `${API_URL}/results/${taskId}/download`;
+        }
+    </script>
+</body>
+
+</html>

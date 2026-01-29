@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tricys Stage 2 Manual Test</title>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+        }
+
+        .box {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 20px;
+        }
+
+        #logs {
+            background: #f0f0f0;
+            height: 300px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+            padding: 10px;
+            border: 1px solid #999;
+        }
+
+        .btn {
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+
+        .red {
+            color: red;
+        }
+
+        .green {
+            color: green;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tricys Backend Stage 2 Tester</h1>
+
+    <div class="box">
+        <h3>1. Create Task</h3>
+        <button class="btn" onclick="createTask()">POST /tasks (Create Basic Task)</button>
+        <div id="createResult"></div>
+    </div>
+
+    <div class="box">
+        <h3>2. WebSocket Logs</h3>
+        Task ID: <input type="text" id="taskId" style="width: 300px;">
+        <button class="btn" onclick="connectWS()">Connect WebSocket</button>
+        <button class="btn" onclick="disconnectWS()">Disconnect</button>
+        <div id="wsStatus">Status: Disconnected</div>
+        <div id="logs">Waiting for logs...</div>
+    </div>
+
+    <div class="box">
+        <h3>3. Stop Task</h3>
+        <button class="btn red" onclick="stopTask()">POST /stop (Stop Task)</button>
+        <div id="stopResult"></div>
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000/api/v1";
+        const WS_URL = "ws://localhost:8000/api/v1";
+        let ws = null;
+
+        async function createTask() {
+            try {
+                const res = await fetch(`${API_URL}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: "BASIC",
+                        config_json: {
+                            "paths": {
+                                "package_path": "D:\\Administrator\\Documents\\Github\\tricys\\example\\example_model_single\\example_model.mo"
+                            },
+                            "simulation": {
+                                "model_name": "example_model.Cycle",
+                                "variableFilter": "time|sds.I[1]",
+                                "stop_time": 2000.0,
+                                "step_size": 0.5
+                            },
+                            "simulation_parameters": {
+                                "tep_fep.to_SDS_Fraction[1]": [0.1, 0.15, 0.2, 0.3, 0.4, 0.6, 0.8]
+                            }
+                        }
+                    })
+                });
+                const data = await res.json();
+                document.getElementById('createResult').innerText = JSON.stringify(data, null, 2);
+                if (data.id) {
+                    document.getElementById('taskId').value = data.id;
+                }
+            } catch (e) {
+                document.getElementById('createResult').innerText = "Error: " + e;
+            }
+        }
+
+        function connectWS() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert("Enter Task ID");
+
+            if (ws) ws.close();
+
+            ws = new WebSocket(`${WS_URL}/ws/tasks/${taskId}`);
+
+            ws.onopen = () => {
+                document.getElementById('wsStatus').innerText = "Status: Connected";
+                document.getElementById('wsStatus').className = "green";
+                document.getElementById('logs').innerText += "\n--- Connected ---\n";
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'log') {
+                    const logs = document.getElementById('logs');
+                    logs.innerText += msg.data; // + "\n"; // data usually has newline
+                    logs.scrollTop = logs.scrollHeight;
+                } else {
+                    console.log("Other msg:", msg);
+                }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('wsStatus').innerText = "Status: Disconnected";
+                document.getElementById('wsStatus').className = "red";
+                document.getElementById('logs').innerText += "\n--- Disconnected ---\n";
+            };
+        }
+
+        function disconnectWS() {
+            if (ws) ws.close();
+        }
+
+        async function stopTask() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert("Enter Task ID");
+
+            try {
+                const res = await fetch(`${API_URL}/tasks/${taskId}/stop`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                document.getElementById('stopResult').innerText = JSON.stringify(data, null, 2);
+            } catch (e) {
+                document.getElementById('stopResult').innerText = "Error: " + e;
+            }
+        }
+    </script>
+</body>
+
+</html>
