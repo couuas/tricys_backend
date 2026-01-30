@@ -14,12 +14,15 @@ class Settings(BaseSettings):
     TRICYS_CMD: str = "tricys"  # or "python -m tricys"
     
     # CORS Configuration - can be overridden via environment variable
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
+    # Including '*' for development, but note that main.py needs to handle this 
+    # carefully with allow_credentials.
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8080,http://localhost:5500,http://localhost:5173,null,*"
     
     @property
     def cors_origins_list(self) -> list:
         """Parse CORS_ORIGINS string into list."""
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        return origins
 
     class Config:
         case_sensitive = True

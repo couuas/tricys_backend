@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tricys Backend 交互式手动测试</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --success-color: #16a34a;
+            --error-color: #dc2626;
+            --warning-color: #ca8a04;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-color: #1e293b;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            max-width: 1000px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+
+        h1 {
+            text-align: center;
+            color: var(--primary-color);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            margin-bottom: 1.5rem;
+        }
+
+        .card h2 {
+            margin-top: 0;
+            font-size: 1.25rem;
+            border-bottom: 2px solid #f1f5f9;
+            padding-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button.secondary {
+            background-color: #64748b;
+        }
+
+        button.danger {
+            background-color: var(--error-color);
+        }
+
+        button.warning {
+            background-color: var(--warning-color);
+        }
+
+        pre {
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 1rem;
+            border-radius: 4px;
+            font-size: 0.875rem;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            padding: 0.5rem;
+            margin: 0.5rem 0;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-running {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-pending {
+            background: #fef9c3;
+            color: #854d0e;
+        }
+
+        .status-failed {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        #wsStatus {
+            font-size: 0.875rem;
+            margin-left: 0.5rem;
+        }
+
+        .progress-container {
+            margin-top: 0.5rem;
+            background-color: #e2e8f0;
+            border-radius: 9999px;
+            height: 0.75rem;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background-color: var(--success-color);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tricys Backend 交互式测试面板</h1>
+
+    <div class="grid">
+        <!-- 1. 系统概览与统计 -->
+        <div class="card">
+            <h2>📊 系统统计 <button onclick="fetchStats()" class="secondary">刷新</button></h2>
+            <div id="statsDisplay">
+                <p>点击刷新获取最新数据...</p>
+            </div>
+            <pre id="statsOutput" style="max-height: 150px;">{}</pre>
+        </div>
+
+        <!-- 2. 健康检查 -->
+        <div class="card">
+            <h2>🏥 服务状态</h2>
+            <div class="actions">
+                <button onclick="checkHealth()">检查 /health</button>
+                <button onclick="getTemplate()" class="secondary">获取配置模板</button>
+            </div>
+            <pre id="healthOutput" style="max-height: 150px;">等待操作...</pre>
+        </div>
+    </div>
+
+    <!-- 3. 任务管理 -->
+    <div class="card">
+        <h2>🚀 任务管理</h2>
+        <div class="grid" style="grid-template-columns: 1fr 1fr;">
+            <div>
+                <label>任务类型</label>
+                <select id="taskType">
+                    <option value="basic">Basic Simulation</option>
+                    <option value="analysis">Analysis Simulation</option>
+                </select>
+                <label>配置 (JSON)</label>
+                <textarea id="taskConfig" rows="8">{
+  "simulation": {
+    "model_name": "Tricys.Examples.Basic",
+    "stop_time": 5.0,
+    "step_size": 0.1
+  }
+}</textarea>
+                <button onclick="createTask()" style="width: 100%; margin-top: 1rem;">创建并运行任务</button>
+            </div>
+            <div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label>最近任务</label>
+                    <button onclick="listTasks()" class="secondary"
+                        style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">刷新列表</button>
+                </div>
+                <div id="taskList"
+                    style="max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem;">
+                    <p style="text-align: center; color: #64748b;">暂无任务，点击刷新查看</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 4. 实时监控 (WebSocket) -->
+    <div class="card">
+        <h2>📡 实时日志与进度 <span id="wsStatus">● 未连接</span></h2>
+        <div class="actions">
+            <input type="text" id="wsTaskId" placeholder="输入 Task ID" style="flex: 1; margin: 0;">
+            <button onclick="connectWS()">连接 WebSocket</button>
+            <button onclick="disconnectWS()" class="danger">断开</button>
+        </div>
+        <div id="currentProgressBox" style="display: none; margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                <span id="progressText">进度: 0%</span>
+                <span id="lastProgressLog">等待解析...</span>
+            </div>
+            <div class="progress-container">
+                <div id="progressBar" class="progress-bar"></div>
+            </div>
+        </div>
+        <pre id="logOutput">等待连接...</pre>
+    </div>
+
+    <!-- 5. 异常验证 -->
+    <div class="card">
+        <h2>⚠️ 安全与校验测试 (负面测试)</h2>
+        <p style="font-size: 0.875rem; color: #64748b; margin-bottom: 1rem;">验证后端是否正确拦截非法请求</p>
+        <div class="actions">
+            <button onclick="testInvalidModel()" class="warning">无效模型名</button>
+            <button onclick="testPathTraversal()" class="warning">路径遍历攻击</button>
+            <button onclick="testStopStopped()" class="warning">停止已终止任务</button>
+        </div>
+        <pre id="errorOutput">等待验证...</pre>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000/api/v1";
+        const WS_BASE = "ws://localhost:8000/api/v1/ws/tasks";
+        let socket = null;
+
+        // --- 统计算法 ---
+        async function fetchStats() {
+            try {
+                const res = await fetch(`${API_BASE}/tasks/stats/summary`);
+                const data = await res.json();
+                document.getElementById('statsOutput').textContent = JSON.stringify(data, null, 2);
+
+                const stats = data;
+                let html = `<div style="display: flex; gap: 1rem; justify-content: space-around;">
+                    <div style="text-align: center;"><strong>总计</strong><br>${stats.total_tasks || 0}</div>
+                    <div style="text-align: center; color: var(--primary-color);"><strong>运行中</strong><br>${stats.status_counts?.running || 0}</div>
+                    <div style="text-align: center; color: var(--success-color);"><strong>今日完成</strong><br>${stats.completed_today || 0}</div>
+                </div>`;
+                document.getElementById('statsDisplay').innerHTML = html;
+            } catch (e) {
+                document.getElementById('statsOutput').textContent = "错误: " + e.message;
+            }
+        }
+
+        // --- 系统状态 ---
+        async function checkHealth() {
+            try {
+                const res = await fetch('http://localhost:8000/health');
+                const data = await res.json();
+                document.getElementById('healthOutput').textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                try {
+                    const res = await fetch(`${API_BASE}/health`);
+                    const data = await res.json();
+                    document.getElementById('healthOutput').textContent = "API Health:\n" + JSON.stringify(data, null, 2);
+                } catch (e2) {
+                    document.getElementById('healthOutput').textContent = "Root Error: " + e.message + "\nAPI Error: " + e2.message;
+                }
+            }
+        }
+
+        async function getTemplate() {
+            try {
+                const res = await fetch(`${API_BASE}/config/template`);
+                const data = await res.json();
+                document.getElementById('taskConfig').value = JSON.stringify(data, null, 2);
+                document.getElementById('healthOutput').textContent = "模板已加载到表单";
+            } catch (e) { document.getElementById('healthOutput').textContent = e.message; }
+        }
+
+        // --- 任务操作 ---
+        async function createTask() {
+            const type = document.getElementById('taskType').value;
+            let config;
+            try {
+                config = JSON.parse(document.getElementById('taskConfig').value);
+            } catch (e) {
+                return alert("JSON 格式错误: " + e.message);
+            }
+
+            try {
+                // Correct format for TaskCreate
+                const payload = {
+                    type: type.toUpperCase(),
+                    config_json: config
+                };
+
+                const res = await fetch(`${API_BASE}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    alert(`任务创建成功: ${data.id}`);
+                    document.getElementById('wsTaskId').value = data.id;
+                    listTasks();
+                } else {
+                    alert(`失败: ${data.detail || JSON.stringify(data)}`);
+                }
+            } catch (e) { alert("网络错误: " + e.message); }
+        }
+
+        async function listTasks() {
+            try {
+                const res = await fetch(`${API_BASE}/tasks?limit=5`);
+                const tasks = await res.json();
+                const container = document.getElementById('taskList');
+
+                if (!Array.isArray(tasks) || tasks.length === 0) {
+                    container.innerHTML = '<p style="text-align: center; color: #64748b;">暂无记录</p>';
+                    return;
+                }
+
+                container.innerHTML = tasks.map(t => `
+                    <div style="border-bottom: 1px solid #f1f5f9; padding: 0.5rem 0; font-size: 0.875rem;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <strong>${t.id.substring(0, 8)}...</strong>
+                            <span class="status-badge status-${t.status.toLowerCase()}">${t.status}</span>
+                        </div>
+                        <div style="margin-top: 0.25rem; display: flex; gap: 0.5rem;">
+                            <button onclick="watchTask('${t.id}')" class="secondary" style="padding: 2px 8px; font-size: 0.7rem;">监控</button>
+                            <button onclick="stopTask('${t.id}')" class="warning" style="padding: 2px 8px; font-size: 0.7rem;" ${t.status !== 'RUNNING' && t.status !== 'PENDING' ? 'disabled' : ''}>停止</button>
+                            <button onclick="deleteTask('${t.id}')" class="danger" style="padding: 2px 8px; font-size: 0.7rem;">删除</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error(e);
+                document.getElementById('taskList').innerHTML = `<p style="color:red">列表加载失败: ${e.message}</p>`;
+            }
+        }
+
+        function watchTask(id) {
+            document.getElementById('wsTaskId').value = id;
+            connectWS();
+        }
+
+        async function stopTask(id) {
+            if (!confirm("确定停止？")) return;
+            try {
+                const res = await fetch(`${API_BASE}/tasks/${id}/stop`, { method: 'POST' });
+                const data = await res.json();
+                alert(data.message || "已发送停止指令");
+                listTasks();
+            } catch (e) { alert(e.message); }
+        }
+
+        async function deleteTask(id) {
+            const cleanup = confirm("是否同时清理工作目录文件？");
+            try {
+                const res = await fetch(`${API_BASE}/tasks/${id}?cleanup_files=${cleanup}`, { method: 'DELETE' });
+                const data = await res.json();
+                alert(data.message || "已删除");
+                listTasks();
+            } catch (e) { alert(e.message); }
+        }
+
+        // --- WebSocket ---
+        function connectWS() {
+            const id = document.getElementById('wsTaskId').value;
+            if (!id) return alert("请先获取或输入 Task ID");
+
+            if (socket) socket.close();
+
+            socket = new WebSocket(`${WS_BASE}/${id}`);
+            const statusEl = document.getElementById('wsStatus');
+            const logEl = document.getElementById('logOutput');
+            const progressBox = document.getElementById('currentProgressBox');
+
+            statusEl.textContent = "● 连接中...";
+            statusEl.style.color = "var(--warning-color)";
+            logEl.textContent = `--- 正在连接 ${id} ---\n`;
+            progressBox.style.display = "block";
+            updateProgress(0);
+
+            socket.onopen = () => {
+                statusEl.textContent = "● 已连接";
+                statusEl.style.color = "var(--success-color)";
+            };
+
+            socket.onmessage = (event) => {
+                const line = event.data;
+                logEl.textContent += line + "\n";
+                logEl.scrollTop = logEl.scrollHeight;
+
+                // 简单的客户端进度解析 (模拟后端解析结果)
+                parseProgress(line);
+            };
+
+            socket.onclose = () => {
+                statusEl.textContent = "● 已断开";
+                statusEl.style.color = "var(--error-color)";
+            };
+
+            socket.onerror = (e) => {
+                logEl.textContent += "连接错误\n";
+            };
+        }
+
+        function disconnectWS() {
+            if (socket) socket.close();
+        }
+
+        function parseProgress(line) {
+            // 匹配三种主要模式
+            let progress = -1;
+
+            // 模式 1: Job X/Y
+            const m1 = line.match(/job\s+(\d+)\/(\d+)/i) || line.match(/job\s+(\d+)\s+of\s+(\d+)/i);
+            if (m1) progress = Math.round((parseInt(m1[1]) / parseInt(m1[2])) * 100);
+
+            // 模式 2: Percentage
+            const m2 = line.match(/progress:\s*(\d+)%/i);
+            if (m2) progress = parseInt(m2[1]);
+
+            // 模式 3: Brackets
+            const m3 = line.match(/\[(\d+)%\]/);
+            if (m3) progress = parseInt(m3[1]);
+
+            if (progress >= 0 && progress <= 100) {
+                updateProgress(progress);
+                document.getElementById('lastProgressLog').textContent = "解析到: " + progress + "%";
+            }
+        }
+
+        function updateProgress(val) {
+            document.getElementById('progressBar').style.width = val + "%";
+            document.getElementById('progressText').textContent = `进度: ${val}%`;
+        }
+
+        // --- 异常验证 ---
+        async function runTest(url, method, body, title) {
+            const out = document.getElementById('errorOutput');
+            out.textContent = `--- ${title} 测试中 ---\n`;
+            try {
+                const res = await fetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: body ? JSON.stringify(body) : null
+                });
+                const data = await res.json();
+                out.textContent += `状态码: ${res.status}\n`;
+                out.textContent += `响应内容:\n${JSON.stringify(data, null, 2)}`;
+            } catch (e) {
+                out.textContent += `网络错误: ${e.message}`;
+            }
+        }
+
+        function testInvalidModel() {
+            runTest(`${API_BASE}/tasks`, 'POST', {
+                type: 'BASIC',
+                config_json: {
+                    type: 'basic',
+                    simulation: { model_name: "Illegal;Model&Name" }
+                }
+            }, "无效模型名");
+        }
+
+        function testPathTraversal() {
+            runTest(`${API_BASE}/tasks`, 'POST', {
+                type: 'BASIC',
+                config_json: {
+                    type: 'basic',
+                    simulation: { model_name: "Test" },
+                    paths: { package_path: "../../../ssh/id_rsa" }
+                }
+            }, "路径遍历防护");
+        }
+
+        function testStopStopped() {
+            runTest(`${API_BASE}/tasks/invalid-id-test/stop`, 'POST', null, "测试任务不存在 (预期 404)");
+        }
+
+        // 初始化时获取一次状态
+        fetchStats();
+    </script>
+</body>
+
+</html>
