@@ -51,7 +51,8 @@ class LogReaderThread(threading.Thread):
 
 class SimulationEngine:
     def __init__(self):
-        pass
+        # Store active Popen objects for proper cleanup
+        self._active_processes: dict[int, subprocess.Popen] = {}
 
     def run_task(self, task_id: str, workspace_path: Path, config_path: Path, task_type: str, enhanced: bool = False, turbo: bool = False) -> tuple[int, Optional[str]]:
         """
@@ -92,6 +93,9 @@ class SimulationEngine:
                 env=os.environ.copy() # Pass current env
             )
             
+            # Store process object for proper cleanup
+            self._active_processes[process.pid] = process
+            
             # Get current event loop for threadsafe calls
             try:
                 loop = asyncio.get_running_loop()
@@ -109,23 +113,64 @@ class SimulationEngine:
         except Exception as e:
             logger.error(f"Failed to start process: {e}")
             return -1, str(e)
+    
+    def cleanup_process(self, pid: int):
+        """Remove process from active registry after it completes."""
+        if pid in self._active_processes:
+            del self._active_processes[pid]
 
     def stop_task(self, pid: int) -> bool:
         """
         Stops the process with the given PID.
+        Uses graceful SIGTERM first, then escalates to SIGKILL if needed.
         Returns True if successful, False otherwise.
         """
         try:
             parent = psutil.Process(pid)
+            
             # Terminate children first (if any, e.g. from shell=True or sub-subprocesses)
             for child in parent.children(recursive=True):
-                child.terminate()
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+            
+            # Terminate parent
             parent.terminate()
+            
+            # Wait up to 5 seconds for graceful termination
+            try:
+                parent.wait(timeout=5)
+                logger.info(f"Process {pid} terminated gracefully")
+                return True
+            except psutil.TimeoutExpired:
+                # Process didn't terminate, escalate to SIGKILL
+                logger.warning(f"Process {pid} didn't terminate gracefully, sending SIGKILL")
+                for child in parent.children(recursive=True):
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                parent.kill()
+                
+                # Wait additional 2 seconds for forced kill
+                try:
+                    parent.wait(timeout=2)
+                    logger.info(f"Process {pid} killed forcefully")
+                    return True
+                except psutil.TimeoutExpired:
+                    logger.error(f"Process {pid} could not be killed")
+                    return False
+                    
+        except psutil.NoSuchProcess:
+            # Process already dead
+            logger.info(f"Process {pid} already terminated")
             return True
         except ImportError:
-            # Fallback to os.kill
+            # Fallback to os.kill if psutil not available
             try:
                 os.kill(pid, signal.SIGTERM)
+                # Can't easily wait without psutil, assume success
                 return True
             except OSError:
                 return False
