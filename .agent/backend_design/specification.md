@@ -60,13 +60,16 @@ stateDiagram-v2
     *   实时日志通过 WebSocket 推送。
     *   全量日志必须写入 `workspaces/.../simulation.log`，供历史回溯。
 *   **清理**: 提供定期清理旧任务文件（如保留 7 天）的策略配置。仅保留 HDF5 和 Config，删除过程临时文件。
+*   **文件浏览**: (New in Stage 6) 提供 API 递归列出 `Task Workspace` 下的所有文件和文件夹，支持查看元数据（大小、修改时间）。
+*   **流式传输**: (New in Stage 6) 实现 `StreamingResponse`，支持断点续传，确保下载 10GB+ HDF5 文件不仅不占用后端内存，且支持暂停/恢复。
 
 ### 3.3 数据服务
 *   **HDF5 查询引擎**:
     *   支持按 Variable Name、Job ID、Time Range 进行切片查询。
     *   返回格式优化为紧凑的 JSON Structure `{"time": [...], "values": [...]}`。
+    *   (New in Stage 6) **Metrics Summary**: 直接从 HDF5 的 `/summary` 表读取预计算指标，用于快速概览。
 
-### 3.3 通知服务
+### 3.4 通知服务
 *   基于 WebSocket 的 Pub/Sub 模型。
 *   Channel 设计: `/ws/task/{task_id}`。
 *   消息类型: 

@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stage 6: Result Management Manual Test</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .card {
+            border: 1px solid #ccc;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+
+        .form-group {
+            margin-bottom: 10px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        textarea {
+            width: 100%;
+            height: 200px;
+            font-family: monospace;
+        }
+
+        input[type="text"] {
+            width: 70%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        button.poll {
+            background-color: #28a745;
+        }
+
+        button.poll:hover {
+            background-color: #218838;
+        }
+
+        pre {
+            background: #f5f5f5;
+            padding: 10px;
+            overflow-x: auto;
+            border-radius: 4px;
+        }
+
+        .file-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .file-list li {
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .file-list li.directory {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .file-list li.file {
+            color: #555;
+        }
+
+        .file-list a {
+            text-decoration: none;
+            color: #007bff;
+            margin-left: 10px;
+        }
+
+        .error {
+            color: red;
+        }
+
+        .status-badge {
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: white;
+            font-weight: bold;
+        }
+
+        .RUNNING {
+            background: #007bff;
+        }
+
+        .COMPLETED {
+            background: #28a745;
+        }
+
+        .FAILED {
+            background: #dc3545;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Stage 6: Result Management Manual Test</h1>
+
+    <!-- Test 0: Run Simulation -->
+    <div class="card">
+        <h2>0. Setup: Run Simulation Task</h2>
+        <p>Use this to generate fresh data for testing the Result endpoints.</p>
+        <div class="form-group">
+            <label for="configJson">Simulation Config (JSON):</label>
+            <textarea id="configJson">{
+    "paths": {
+        "package_path": "D:\\\\Administrator\\\\Documents\\\\Github\\\\tricys\\\\example\\\\example_model_single\\\\example_model.mo"
+    },
+    "simulation": {
+        "model_name": "example_model.Cycle",
+        "variableFilter": "time|sds.I[1]",
+        "stop_time": 2000.0,
+        "step_size": 0.5,
+        "concurrent": true
+    },
+    "simulation_parameters": {
+        "tep_fep.to_SDS_Fraction[1]":[0.1,0.15,0.2,0.3,0.4,0.6,0.8]
+    },
+    "metrics_definition": {
+        "Startup_Inventory": {
+            "source_column": "sds.I[1]",
+            "method": "calculate_startup_inventory"
+        },
+        "Self_Sufficiency_Time": {
+            "source_column": "sds.I[1]",
+            "method": "time_of_turning_point"
+        },
+        "Doubling_Time": {
+            "source_column": "sds.I[1]",
+            "method": "calculate_doubling_time"
+        }
+    }
+}</textarea>
+        </div>
+        <button onclick="submitTask()">Run Simulation</button>
+        <div id="submitResult"></div>
+    </div>
+
+    <div class="card">
+        <h2>Current Task Status</h2>
+        <div class="form-group">
+            <label for="taskId">Task ID:</label>
+            <input type="text" id="taskId" placeholder="Task ID will appear here after submission...">
+            <button class="poll" onclick="pollStatus()">Check Status</button>
+        </div>
+        <div id="pollResult"></div>
+    </div>
+
+    <!-- Test 1: Summary Metrics -->
+    <div class="card">
+        <h2>1. Summary Metrics API</h2>
+        <p>Endpoint: <code>GET /results/tasks/{task_id}/result_summary</code></p>
+        <button onclick="getSummary()">Get Summary Metrics</button>
+        <div id="summaryResult"></div>
+    </div>
+
+    <!-- Test 2: File Browser -->
+    <div class="card">
+        <h2>2. File Browser API</h2>
+        <p>Endpoint: <code>GET /results/tasks/{task_id}/files</code></p>
+        <button onclick="getFiles()">List Workspace Files</button>
+        <div id="filesResult"></div>
+    </div>
+
+    <!-- Test 3: Download File -->
+    <div class="card">
+        <h2>3. File Streaming API</h2>
+        <p>Endpoint: <code>GET /results/tasks/{task_id}/files/{file_path}</code></p>
+        <div class="form-group">
+            <label for="filePath">Relative File Path:</label>
+            <input type="text" id="filePath" placeholder="e.g., sweep_results.csv or job_1/job_metrics.json">
+        </div>
+        <button onclick="downloadFile()">Download File</button>
+        <div id="downloadResult"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000/api/v1';
+
+        async function submitTask() {
+            const configText = document.getElementById('configJson').value;
+            let config;
+            try {
+                config = JSON.parse(configText);
+            } catch (e) {
+                return alert("Invalid JSON Config");
+            }
+
+            const payload = {
+                "type": "BASIC",
+                "name": "Stage 6 Result Test",
+                "config_json": config
+            };
+
+            const resultDiv = document.getElementById('submitResult');
+            resultDiv.innerHTML = "Submitting...";
+
+            try {
+                const response = await fetch(`${API_BASE}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    resultDiv.innerHTML = `<pre>Task Created: ID = ${data.id}</pre>`;
+                    document.getElementById('taskId').value = data.id;
+                    pollStatus(); // Auto poll once
+                } else {
+                    resultDiv.innerHTML = `<p class="error">Error: ${data.detail || JSON.stringify(data)}</p>`;
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">Request failed: ${e.message}</p>`;
+            }
+        }
+
+        async function pollStatus() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return;
+
+            const resultDiv = document.getElementById('pollResult');
+
+            try {
+                const response = await fetch(`${API_BASE}/tasks/${taskId}`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    resultDiv.innerHTML = `
+                        Status: <span class="status-badge ${data.status}">${data.status}</span>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `<p class="error">Error: ${data.detail}</p>`;
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">Msg: ${e.message}</p>`;
+            }
+        }
+
+        async function getSummary() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert('Please enter a Task ID');
+
+            const resultDiv = document.getElementById('summaryResult');
+            resultDiv.innerHTML = 'Loading...';
+
+            try {
+                const response = await fetch(`${API_BASE}/results/tasks/${taskId}/result_summary`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    resultDiv.innerHTML = `<h3>Response:</h3><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                } else {
+                    resultDiv.innerHTML = `<p class="error">Error: ${data.detail || response.statusText}</p>`;
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">Request failed: ${e.message}</p>`;
+            }
+        }
+
+        async function getFiles() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) return alert('Please enter a Task ID');
+
+            const resultDiv = document.getElementById('filesResult');
+            resultDiv.innerHTML = 'Loading...';
+
+            try {
+                const response = await fetch(`${API_BASE}/results/tasks/${taskId}/files`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    let html = '<h3>Files:</h3><ul class="file-list">';
+
+                    function renderItem(item, parentPath = '') {
+                        let path = parentPath ? `${parentPath}/${item.name}` : item.name;
+
+                        if (item.type === 'directory') {
+                            html += `<li class="directory">📁 ${item.name}</li>`;
+                            if (item.children) {
+                                html += '<ul>';
+                                item.children.forEach(child => renderItem(child, path));
+                                html += '</ul>';
+                            }
+                        } else {
+                            html += `<li class="file">📄 ${item.name} (${item.size} bytes) 
+                                     <button onclick="document.getElementById('filePath').value='${path}'">Select</button></li>`;
+                        }
+                    }
+
+                    data.forEach(item => renderItem(item));
+                    html += '</ul>';
+                    html += `<br><h3>Raw JSON:</h3><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                    resultDiv.innerHTML = html;
+                } else {
+                    resultDiv.innerHTML = `<p class="error">Error: ${data.detail || response.statusText}</p>`;
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">Request failed: ${e.message}</p>`;
+            }
+        }
+
+        async function downloadFile() {
+            const taskId = document.getElementById('taskId').value;
+            const filePath = document.getElementById('filePath').value;
+            if (!taskId || !filePath) return alert('Task ID and File Path required');
+
+            const encodedPath = encodeURIComponent(filePath);
+            const url = `${API_BASE}/results/tasks/${taskId}/files/${encodedPath}`;
+
+            // Trigger download
+            window.open(url, '_blank');
+            document.getElementById('downloadResult').innerHTML = `<p>Attempted download from: ${url}</p>`;
+        }
+    </script>
+</body>
+
+</html>

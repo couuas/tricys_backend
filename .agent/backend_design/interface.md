@@ -179,3 +179,34 @@
 ### 4.3 系统健康检查
 *   **Endpoint**: `GET /health`
 *   **Response**: `{"status": "ok", "version": "1.0.0"}`
+
+## 5. 结果文件服务 (Result Services - Stage 6)
+提供对任务结果文件的细粒度访问。
+
+#### 2.7.1 获取结果摘要
+*   **Endpoint**: `GET /tasks/{task_id}/result_summary`
+*   **Response**: 
+    ```json
+    {
+      "metrics": [{"job_id": 1, "Startup Inventory": 100.5, ...}], // Summary table
+      "file_size_mb": 150.2,
+      "generated_at": "2023-10-27T10:05:00Z"
+    }
+    ```
+
+#### 2.7.2 浏览结果文件
+*   **Endpoint**: `GET /tasks/{task_id}/files`
+*   **Query Params**: `path` (optional sub-directory)
+*   **Response**: 
+    ```json
+    [
+      {"name": "results.h5", "type": "file", "size": 1048576, "modified": "..."},
+      {"name": "logs", "type": "dir", "size": 0, "modified": "..."}
+    ]
+    ```
+
+#### 2.7.3 下载结果文件
+所有文件均支持 `Range` 请求头，实现流式下载/断点续传。
+*   **Endpoint**: `GET /tasks/{task_id}/files/download`
+*   **Query Params**: `path` (relative file path)
+*   **Response**: `application/octet-stream`

@@ -57,6 +57,7 @@ tricys_backend/
 ├── services/
 │   ├── engine.py        # 核心：子进程管理、日志捕获
 │   ├── file_manager.py  # 文件读写、工作区管理
+│   ├── file_browser.py  # 文件浏览与流式下载服务
 │   └── task_queue.py    # 简单的 FIFO 调度器
 └── utils/
     ├── websocket.py     # 连接管理器

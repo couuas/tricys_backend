@@ -112,3 +112,18 @@
     *   **Progress UI**: 提交一个模拟输出进度的任务，观察进度条是否随 WebSocket 消息实时滚动。
     *   **Security Check**: 点击"路径遍历攻击"按钮，确认后端返回 422 错误而非 500 崩溃。
 
+## 阶段 6: 结果管理与流式传输 (Stage 6: Result Management & Enhanced Features)
+**目标**: 提供便捷的结果获取渠道，支持 HDF5 文件浏览、下载及摘要查询，并通过流式传输优化大文件处理体验。
+
+### 6.1 开发任务
+*   [x] **结果摘要**: 实现 `GET /tasks/{id}/result_summary`，返回 HDF5 关键元数据（如 Metrics Table）。
+*   [x] **文件浏览**: 实现 `GET /tasks/{id}/files`，递归列出工作区文件结构。
+*   [x] **文件下载**: 升级文件下载接口，支持 `Range` 请求头，实现断点续传和大文件流式传输。
+*   [x] **手动测试页面**: 更新 `manual_test_stage6.html`，集成结果浏览和下载功能。
+
+### 6.2 测试策略
+*   **集成测试 (Integration)** - 详见 `tests/test_stage6.py`:
+    *   **Case 6.1**: `test_list_result_files` - 验证文件列表的递归结构和元数据（大小、修改时间）。
+    *   **Case 6.2**: `test_download_file_stream` - 通过 `StreamingResponse` 下载大文件，验证内存占用可控。
+    *   **Case 6.3**: `test_get_result_summary` - 验证能正确从 HDF5 `/summary` 表中读取指标数据。
+

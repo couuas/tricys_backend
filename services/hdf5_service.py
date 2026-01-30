@@ -153,3 +153,24 @@ class HDF5ReaderService:
                 df = df[cols_to_keep]
             
         return df.to_dict(orient='list')
+
+    def get_summary_metrics(self, task_id: str, workspace_path: Path) -> List[Dict[str, Any]]:
+        """
+        Retrieves summary metrics from the HDF5 file.
+        Returns a list of dicts: [{'job_id': 1, 'metric_name': 'X', 'metric_value': 10.0}, ...]
+        """
+        try:
+            hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
+            if not hdf5_file or not hdf5_file.exists():
+                # Fallback or return empty
+                return []
+            
+            with pd.HDFStore(hdf5_file, mode='r') as store:
+                if '/summary' in store:
+                    df = store.select('summary')
+                    return df.to_dict(orient='records')
+                else:
+                    return []
+        except Exception as e:
+            logger.error(f"Error reading summary metrics for task {task_id}: {str(e)}")
+            return []
