@@ -126,10 +126,10 @@ class TaskQueue:
                 task.error_msg = str(e)
             finally:
                 task.updated_at = datetime.utcnow()
-                # Only clear PID after we're done with the process
+                # Clear PID and cleanup process resources
                 if task.pid:
                     cls._engine_service.cleanup_process(task.pid)
-                    task.pid = None
+                task.pid = None
                 session.add(task)
                 session.commit()
 

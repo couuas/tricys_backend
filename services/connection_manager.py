@@ -36,8 +36,20 @@ class ConnectionManager:
             for connection in connections:
                 send_tasks.append(self._safe_send(connection, message, task_id))
             
-            # Execute all sends concurrently, ignore exceptions
-            await asyncio.gather(*send_tasks, return_exceptions=True)
+            # Execute all sends concurrently, collect results to handle failures
+            results = await asyncio.gather(*send_tasks, return_exceptions=True)
+            
+            # Clean up failed connections
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # Connection failed, remove it from active connections
+                    try:
+                        if connections[i] in self.active_connections.get(task_id, []):
+                            self.active_connections[task_id].remove(connections[i])
+                            if not self.active_connections[task_id]:
+                                del self.active_connections[task_id]
+                    except (ValueError, KeyError):
+                        pass  # Already removed
     
     async def _safe_send(self, connection: WebSocket, message: dict, task_id: str):
         """Helper to safely send a message and handle errors."""
@@ -45,6 +57,6 @@ class ConnectionManager:
             await connection.send_json(message)
         except Exception as e:
             logger.warning(f"Failed to send message to client for task {task_id}: {e}")
-            # Could cleanup here, but disconnect() usually handles it
+            raise  # Re-raise to let gather handle it
                     
 manager = ConnectionManager()

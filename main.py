@@ -33,7 +33,6 @@ async def recover_orphaned_tasks():
                 # No PID recorded, mark as failed
                 task.status = "FAILED"
                 task.error_msg = "Process lost: No PID recorded"
-                task.pid = None
                 recovered_count += 1
             else:
                 try:
@@ -42,8 +41,16 @@ async def recover_orphaned_tasks():
                         # Verify it's actually a tricys process to detect PID reuse
                         try:
                             proc = psutil.Process(task.pid)
-                            cmdline = " ".join(proc.cmdline())
-                            if "tricys" not in cmdline.lower():
+                            cmdline = " ".join(proc.cmdline()).lower()
+                            # Check for tricys executable specifically (not just substring match)
+                            is_tricys = False
+                            if "tricys" in cmdline:
+                                # Verify it's the actual tricys command, not just in a path
+                                parts = proc.cmdline()
+                                if parts and ("tricys" in parts[0] or any("tricys" in p and ("basic" in cmdline or "analysis" in cmdline) for p in parts)):
+                                    is_tricys = True
+                            
+                            if not is_tricys:
                                 # PID reused by different process
                                 task.status = "FAILED"
                                 task.error_msg = "Process lost: PID reuse detected"
@@ -111,7 +118,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,  # Specific origins instead of wildcard
+    allow_origins=settings.cors_origins_list,  # Configurable via environment variable
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
