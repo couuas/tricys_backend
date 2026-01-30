@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     # Path Configuration
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
     WORKSPACES_DIR: Path = BASE_DIR / "workspaces"
-    DATABASE_URL: str = "sqlite:///./tricys.db"
+    DATABASE_URL: str = f"sqlite:///{BASE_DIR.joinpath('tricys.db')}"
     
     TRICYS_CMD: str = "tricys"  # or "python -m tricys"
     

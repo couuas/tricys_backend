@@ -16,16 +16,17 @@ from tricys_backend.models.task import Task
 
 # Use a separate test workspace directory
 TEST_WORKSPACES_DIR = Path(settings.BASE_DIR) / "test_other_workspaces"
-TEST_DB_URL = "sqlite:///./test_other.db"
+TEST_DB_NAME = "test_stage4.db"
+TEST_DB_PATH = settings.BASE_DIR / TEST_DB_NAME
+TEST_DB_URL = f"sqlite:///{TEST_DB_PATH}"
 
 engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_env():
     # 0. Cleanup Stale DB
-    db_path = "./test_other.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    if TEST_DB_PATH.exists():
+        os.remove(TEST_DB_PATH)
 
     # 1. Setup Workspaces
     if TEST_WORKSPACES_DIR.exists():

@@ -1,8 +1,3 @@
-"""
-测试新功能：进度解析、增强清理服务、统计端点
-Tests for new features: Progress parsing, enhanced cleanup service, statistics endpoint
-"""
-
 import os
 import pytest
 import tempfile
@@ -22,7 +17,9 @@ from tricys_backend.services.cleanup_service import CleanupService
 from tricys_backend.services.task_queue import db_engine
 
 # 测试数据库配置
-TEST_DB_URL = "sqlite:///./test_new_features.db"
+TEST_DB_NAME = "test_stage5.db"
+TEST_DB_PATH = settings.BASE_DIR / TEST_DB_NAME
+TEST_DB_URL = f"sqlite:///{TEST_DB_PATH}"
 test_engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
 
 
@@ -30,9 +27,8 @@ test_engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": Fals
 def setup_test_env():
     """设置测试环境"""
     # 清理旧数据库
-    db_path = "./test_new_features.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    if TEST_DB_PATH.exists():
+        os.remove(TEST_DB_PATH)
     
     # 创建数据库表
     SQLModel.metadata.create_all(test_engine)
@@ -47,8 +43,8 @@ def setup_test_env():
     yield
     
     # 清理
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    if TEST_DB_PATH.exists():
+        os.remove(TEST_DB_PATH)
 
 
 class TestProgressParsing:
