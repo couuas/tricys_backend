@@ -40,7 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all for manual testing convenience
+    allow_origins=settings.CORS_ORIGINS,  # Specific origins instead of wildcard
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

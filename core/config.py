@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./tricys.db"
     
     TRICYS_CMD: str = "tricys"  # or "python -m tricys"
+    
+    # CORS Configuration
+    CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:8080"]
 
     class Config:
         case_sensitive = True
