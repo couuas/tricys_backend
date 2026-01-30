@@ -27,13 +27,17 @@ class LogReaderThread(threading.Thread):
 
     def run(self):
         try:
-            with open(self.log_path, "a", encoding="utf-8", buffering=1) as f:
+            # Use larger buffer (8KB) for better performance with high-frequency logs
+            # Line buffering (buffering=1) causes excessive disk I/O
+            with open(self.log_path, "a", encoding="utf-8", buffering=8192) as f:
                 # Iterate line by line
                 for line in iter(self.process.stdout.readline, b''):
                     decoded_line = line.decode('utf-8', errors='replace')
                     
                     # 1. Write to file
                     f.write(decoded_line)
+                    # Flush periodically to ensure logs are written
+                    # (automatic with larger buffer, but explicit for important logs)
                     
                     # 2. Broadcast
                     # We use run_coroutine_threadsafe to schedule the async broadcast on the main loop

@@ -1,5 +1,6 @@
 from typing import Dict, List
 from fastapi import WebSocket
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,11 +29,22 @@ class ConnectionManager:
         if task_id in self.active_connections:
             # Create a copy of the list to iterate safely in case of disconnects during iteration
             connections = self.active_connections[task_id][:]
+            
+            # Send messages in parallel using asyncio.gather for better performance
+            # This prevents blocking when multiple clients are connected
+            send_tasks = []
             for connection in connections:
-                try:
-                    await connection.send_json(message)
-                except Exception as e:
-                    logger.warning(f"Failed to send message to client for task {task_id}: {e}")
-                    # Could cleanup here, but disconnect() usually handles it
+                send_tasks.append(self._safe_send(connection, message, task_id))
+            
+            # Execute all sends concurrently, ignore exceptions
+            await asyncio.gather(*send_tasks, return_exceptions=True)
+    
+    async def _safe_send(self, connection: WebSocket, message: dict, task_id: str):
+        """Helper to safely send a message and handle errors."""
+        try:
+            await connection.send_json(message)
+        except Exception as e:
+            logger.warning(f"Failed to send message to client for task {task_id}: {e}")
+            # Could cleanup here, but disconnect() usually handles it
                     
 manager = ConnectionManager()
