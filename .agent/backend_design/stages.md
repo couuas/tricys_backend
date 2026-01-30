@@ -59,7 +59,7 @@
 
 ---
 
-## 其他 (Other: Spec Compliance & Ancillary Features)
+## 阶段 4: 其他 (Other: Spec Compliance & Ancillary Features)
 **目标**: 补全规格说明书中定义的辅助功能，确保与 `interface.md` 的 100% 兼容性。
 
 ### 4.1 开发任务
@@ -75,3 +75,40 @@
     *   [x] **Case 4.2**: `test_health_and_template` - 验证辅助端点的可访问性和返回格式。
     *   [x] **Case 4.3**: `test_query_multijob_hdf5` - 创建包含多个 Job 的 HDF5/CSV，验证查询 API 能正确过滤出指定的 Job 集合。
     *   [x] **Case 4.4**: `test_task_list_filtering & test_task_list_pagination` - 验证任务列表的 `status` 过滤功能以及 `limit`/`offset` 分页逻辑。
+
+---
+
+## 阶段 5: Copilot Reviewer 稳定性与安全性加固 (Stage 5: Stability & Security Hardening)
+**目标**: 基于现有功能进行稳健性增强，重点解决崩溃恢复、磁盘维护、输入安全校验以及测试体系的重构。提升后端作为生产级服务的可靠性。
+
+### 5.1 开发任务
+*   [x] **崩溃恢复 (Crash Recovery)**:
+    *   在 `main.py` 的 lifespan 中实现 `recover_orphaned_tasks`。
+    *   启动时扫描数据库中 `RUNNING` 的任务，若对应 PID 不存在或已被复用，强制标记为 `FAILED`，防止"僵尸任务"。
+*   [x] **进度解析 (Log Parsing)**:
+    *   增强 `LogReaderThread`，支持从标准输出中正则提取进度信息（支持 `Job X/Y`、`XX%`、`[XX%]` 格式）。
+    *   在 WebSocket 消息中增加 `progress/total/percent` 字段。
+*   [x] **智能清理 (Smart Cleanup)**:
+    *   升级 `CleanupService`，仅清理不可变状态 (`COMPLETED`/`FAILED`/`STOPPED`) 的任务文件。
+    *   实现空目录递归清理，并严格遵循 7 天保留策略。
+*   [x] **统计监控 (Statistics)**:
+    *   新增 `GET /tasks/stats/summary` 接口，提供总任务数、状态分布、今日完成数等监控指标。
+*   [x] **安全加固 (Security)**:
+    *   强化 `ConfigJsonSchema`，增加 `model_name` 的正则校验 (防止特殊字符)。
+    *   增加 Path Traversal 防护，禁止文件路径包含 `..`。
+*   [x] **测试重构 (Test Refactoring)**:
+    *   重构 `test_stage1.py` 等集成测试，引入 `pytest-mock` 模拟 subprocess，消除对真实 CLI 的依赖，提高测试稳定性。
+
+### 5.2 测试策略 (Testing)
+*   **单元测试 (Unit)**:
+    *   `TestProgressParsing`: 针对三种不同的日志格式编写正则匹配测试，确保 0-100% 提取准确。
+    *   `TestConfigValidation`: 构造恶意 Payload（如路径遍历、超长参数列表），验证 Pydantic 校验器是否抛出异常。
+*   **集成测试 (Integration)** - 详见 `tests/test_stage5.py`:
+    *   **Case 5.1**: `test_orphaned_task_recovery` - 手动插入无效 PID 的 RUNNING 记录，模拟服务重启，断言状态被修正为 FAILED。
+    *   **Case 5.2**: `test_cleanup_only_terminal_states` - 创建 RUNNING 和 COMPLETED 两个过期任务，验证清理逻辑只删除了已完成的任务文件。
+    *   **Case 5.3**: `test_statistics_summary` - 批量插入不同状态的任务，验证统计接口返回的计数是否准确。
+*   **手动验证 (Manual)** - 使用 `tests/manual_test_stage5.html`:
+    *   **Dashboard**: 打开 HTML，观察"系统统计"面板数据是否正常加载。
+    *   **Progress UI**: 提交一个模拟输出进度的任务，观察进度条是否随 WebSocket 消息实时滚动。
+    *   **Security Check**: 点击"路径遍历攻击"按钮，确认后端返回 422 错误而非 500 崩溃。
+

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlmodel import Session, select
-from typing import List
+from sqlmodel import Session, select, func
+from typing import List, Dict
+import logging
 
 from tricys_backend.utils.db import get_session
 from tricys_backend.models.task import Task, TaskCreate, TaskRead
@@ -9,20 +10,27 @@ from datetime import datetime
 from pathlib import Path
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/tasks", response_model=TaskRead)
 async def create_task(task_in: TaskCreate, session: Session = Depends(get_session)):
     """Create a new simulation task"""
-    # 1. Save to DB
-    task = Task.from_orm(task_in)
-    session.add(task)
-    session.commit()
-    session.refresh(task)
-    
-    # 2. Enqueue
-    await TaskQueue.add_task(task.id)
-    
-    return task
+    try:
+        # 1. Save to DB
+        task = Task.from_orm(task_in)
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+        
+        # 2. Enqueue
+        await TaskQueue.add_task(task.id)
+        
+        logger.info(f"Created task {task.id} with type {task.type}")
+        return task
+    except Exception as e:
+        logger.error(f"Error creating task: {e}")
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
 
 @router.get("/tasks", response_model=List[TaskRead])
 def read_tasks(
@@ -31,13 +39,44 @@ def read_tasks(
     status: str = None,
     session: Session = Depends(get_session)
 ):
-    """Retrieve tasks"""
+    """Retrieve tasks with optional filtering and pagination"""
     query = select(Task).offset(offset).limit(limit).order_by(Task.created_at.desc())
     if status:
         query = query.where(Task.status == status)
         
     tasks = session.exec(query).all()
     return tasks
+
+@router.get("/tasks/stats/summary")
+def get_tasks_summary(session: Session = Depends(get_session)) -> Dict:
+    """Get summary statistics of all tasks"""
+    try:
+        # Count tasks by status
+        total_tasks = session.exec(select(func.count(Task.id))).one()
+        
+        status_counts = {}
+        for status in ["PENDING", "RUNNING", "COMPLETED", "FAILED", "STOPPED"]:
+            count = session.exec(
+                select(func.count(Task.id)).where(Task.status == status)
+            ).one()
+            status_counts[status.lower()] = count
+        
+        # Get recent tasks
+        recent_completed = session.exec(
+            select(func.count(Task.id))
+            .where(Task.status == "COMPLETED")
+            .where(Task.updated_at >= datetime.utcnow().replace(hour=0, minute=0, second=0))
+        ).one()
+        
+        return {
+            "total_tasks": total_tasks,
+            "status_counts": status_counts,
+            "completed_today": recent_completed,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting task summary: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve task summary")
 
 @router.get("/tasks/{task_id}", response_model=TaskRead)
 def read_task(task_id: str, session: Session = Depends(get_session)):
@@ -49,52 +88,43 @@ def read_task(task_id: str, session: Session = Depends(get_session)):
 
 @router.post("/tasks/{task_id}/stop")
 def stop_task(task_id: str, session: Session = Depends(get_session)):
-    """Stop a running task"""
+    """Stop a running or pending task"""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
         
     if task.status not in ["RUNNING", "PENDING"]:
         raise HTTPException(status_code=400, detail=f"Task is in {task.status} state, cannot stop")
-        
-    if task.status == "RUNNING" and task.pid:
-        success = TaskQueue.stop_task(task.pid)
-        if success:
+    
+    try:
+        if task.status == "RUNNING" and task.pid:
+            success = TaskQueue.stop_task(task.pid)
+            if success:
+                task.status = "STOPPED"
+                task.updated_at = datetime.utcnow()
+                session.add(task)
+                session.commit()
+                logger.info(f"Successfully stopped running task {task_id}")
+                return {"message": "Task stopped successfully", "task_id": task_id}
+            else:
+                logger.error(f"Failed to stop process for task {task_id}")
+                raise HTTPException(status_code=500, detail="Failed to stop process")
+                
+        elif task.status == "PENDING":
+            # Mark as stopped - worker will check status before processing
             task.status = "STOPPED"
-            task.updated_at = datetime.utcnow() # Fixed usage
+            task.updated_at = datetime.utcnow()
             session.add(task)
             session.commit()
-            return {"message": "Task stopped successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to stop process")
-            
-    # If PENDING, strictly strictly we should remove from queue, 
-    # but asyncio.Queue doesn't support random removal.
-    # For MVP Stage 2, we just mark as STOPPED in DB. 
-    # The worker when picking it up should check status? 
-    # TaskQueue._process_task currently checks DB: "task = session.get(Task, task_id)".
-    # If we mark it STOPPED here, worker will read STOPPED?
-    # No, worker reads status. If valid, runs.
-    # Let's verify TaskQueue logic.
-    
-    # TaskQueue._process_task:
-    # task = session.get(Task, task_id)
-    # ...
-    # task.status = "RUNNING"
-    
-    # It does NOT check current status. It just overwrites.
-    # So if we mark STOPPED here, worker might overwrite to RUNNING.
-    # We should handle this logic. But for now, let's just handle RUNNING case properly.
-    
-    if task.status == "PENDING":
-        # Placeholder for queue removal logic or status flagging
-        # Ideally we flag the task as cancelled, and worker checks this flag.
-        task.status = "STOPPED"
-        session.add(task)
-        session.commit()
-        return {"message": "Task marked as stopped (was pending)"}
-
-    return {"message": "Task not running"}
+            logger.info(f"Marked pending task {task_id} as stopped")
+            return {"message": "Task marked as stopped (was pending)", "task_id": task_id}
+        
+        return {"message": "Task not running", "task_id": task_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error stopping task {task_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error stopping task: {str(e)}")
 
 @router.delete("/tasks/{task_id}")
 def delete_task(
@@ -102,33 +132,45 @@ def delete_task(
     cleanup_files: bool = Query(default=False), 
     session: Session = Depends(get_session)
 ):
-    """Delete a task. Optionally cleanup workspace files."""
+    """Delete a task from database. Optionally cleanup workspace files."""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
         
     if task.status == "RUNNING":
-        # Try to stop it first? Or just forbid? Spec says nothing, but safe to forbid.
-        raise HTTPException(status_code=400, detail="Cannot delete a running task. Stop it first.")
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot delete a running task. Stop it first."
+        )
 
     # Optional file cleanup
+    files_deleted = False
     if cleanup_files and task.workspace_path:
         import shutil
-        import os
         path = Path(task.workspace_path)
         if path.exists():
             try:
                 shutil.rmtree(path)
+                files_deleted = True
+                logger.info(f"Deleted workspace files for task {task_id}")
             except Exception as e:
-                # Log error but proceed with DB deletion? Or fail?
-                # Usually best to warn.
-                print(f"Warning: Failed to delete workspace {path}: {e}")
+                logger.warning(f"Failed to delete workspace {path}: {e}")
+                # Continue with DB deletion even if file cleanup fails
     
-    session.delete(task)
-    session.commit()
-    
-
-    return {"message": "Task deleted successfully"}
+    try:
+        session.delete(task)
+        session.commit()
+        logger.info(f"Deleted task {task_id} from database")
+        
+        return {
+            "message": "Task deleted successfully",
+            "task_id": task_id,
+            "files_deleted": files_deleted
+        }
+    except Exception as e:
+        logger.error(f"Error deleting task {task_id}: {e}")
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
 
 @router.get("/config/template")
 def get_config_template():
