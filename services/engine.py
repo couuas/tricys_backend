@@ -5,6 +5,7 @@ import sys
 import logging
 import asyncio
 import signal
+import re
 from typing import Optional
 from pathlib import Path
 from tricys_backend.core.config import settings
@@ -17,13 +18,74 @@ class LogReaderThread(threading.Thread):
     """
     Background thread to read subprocess stdout/stderr, write to file,
     and broadcast to WebSocket clients via ConnectionManager.
+    Includes progress parsing from log output.
     """
+    # Progress patterns for parsing tricys output
+    # Pattern 1: "Running job 5/100" or "Job 5 of 100"
+    PROGRESS_PATTERN_1 = re.compile(r'(?:Running\s+job|Job)\s+(\d+)\s*(?:/|of)\s*(\d+)', re.IGNORECASE)
+    # Pattern 2: "Progress: 45%" or "45% complete" or "complete: 45%"
+    PROGRESS_PATTERN_2 = re.compile(r'(?:Progress\s*:|complete\s*:)?\s*(\d+(?:\.\d+)?)\s*%\s*(?:complete)?', re.IGNORECASE)
+    # Pattern 3: "[50%]" or "(50%)"
+    PROGRESS_PATTERN_3 = re.compile(r'[\[\(](\d+(?:\.\d+)?)\s*%[\]\)]')
+    
     def __init__(self, process: subprocess.Popen, log_path: Path, task_id: str, loop: asyncio.AbstractEventLoop):
         super().__init__(daemon=True)
         self.process = process
         self.log_path = log_path
         self.task_id = task_id
         self.loop = loop
+        self.last_progress_percent = 0.0
+
+    def parse_progress(self, line: str) -> Optional[dict]:
+        """
+        Parse progress information from a log line.
+        Returns a progress message dict if progress is detected, None otherwise.
+        """
+        # Try pattern 1: Job x/y
+        match = self.PROGRESS_PATTERN_1.search(line)
+        if match:
+            current = int(match.group(1))
+            total = int(match.group(2))
+            if total > 0:
+                percent = (current / total) * 100
+                # Only emit if progress changed significantly (> 1%)
+                if abs(percent - self.last_progress_percent) >= 1.0:
+                    self.last_progress_percent = percent
+                    return {
+                        "type": "PROGRESS",
+                        "current": current,
+                        "total": total,
+                        "percent": round(percent, 1),
+                        "description": f"Running job {current}/{total}"
+                    }
+        
+        # Try pattern 2: Percentage in text
+        match = self.PROGRESS_PATTERN_2.search(line)
+        if match:
+            percent = float(match.group(1))
+            if 0 <= percent <= 100:
+                if abs(percent - self.last_progress_percent) >= 1.0:
+                    self.last_progress_percent = percent
+                    return {
+                        "type": "PROGRESS",
+                        "percent": round(percent, 1),
+                        "description": line.strip()[:100]  # First 100 chars as description
+                    }
+        
+        # Try pattern 3: [50%] or (50%)
+        match = self.PROGRESS_PATTERN_3.search(line)
+        if match:
+            percent = float(match.group(1))
+            if 0 <= percent <= 100:
+                if abs(percent - self.last_progress_percent) >= 1.0:
+                    self.last_progress_percent = percent
+                    return {
+                        "type": "PROGRESS",
+                        "percent": round(percent, 1),
+                        "description": line.strip()[:100]
+                    }
+        
+        return None
 
     def run(self):
         try:
@@ -39,7 +101,7 @@ class LogReaderThread(threading.Thread):
                     # Flush periodically to ensure logs are written
                     # (automatic with larger buffer, but explicit for important logs)
                     
-                    # 2. Broadcast
+                    # 2. Broadcast log message
                     # We use run_coroutine_threadsafe to schedule the async broadcast on the main loop
                     if self.loop and self.loop.is_running():
                         asyncio.run_coroutine_threadsafe(
@@ -47,8 +109,13 @@ class LogReaderThread(threading.Thread):
                             self.loop
                         )
                         
-                        # TODO: Stage 2 - Progress Regex Parsing here
-                        # if "Progress:" in decoded_line: ...
+                        # 3. Parse and broadcast progress if detected
+                        progress_msg = self.parse_progress(decoded_line)
+                        if progress_msg:
+                            asyncio.run_coroutine_threadsafe(
+                                manager.broadcast_to_task(self.task_id, progress_msg),
+                                self.loop
+                            )
                         
         except Exception as e:
             logger.error(f"Error in LogReaderThread for task {self.task_id}: {e}")
