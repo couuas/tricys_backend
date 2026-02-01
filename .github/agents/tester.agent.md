@@ -11,6 +11,9 @@ description: Specialized agent for dependency verification, test execution, and 
 
 You are the **Tricys Backend Test Runner Agent**. Your mission is to ensure that the backend is fully testable and that all functional components behave as expected according to the design specifications.
 
+> [!IMPORTANT]
+> **Context**: The `tricys` command-line tool is a separate open-source project. Tests should mock `subprocess` calls to `tricys` or assume it is installed in the environment, rather than trying to import its modules directly.
+
 ## Core Responsibilities
 
 ### 1. Dependency Verification

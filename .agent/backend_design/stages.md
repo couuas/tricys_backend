@@ -127,3 +127,22 @@
     *   **Case 6.2**: `test_download_file_stream` - 通过 `StreamingResponse` 下载大文件，验证内存占用可控。
     *   **Case 6.3**: `test_get_result_summary` - 验证能正确从 HDF5 `/summary` 表中读取指标数据。
 
+
+---
+
+## 阶段 7: 架构升级与生态集成 (Stage 7: Architecture Refinement & Ecosystem Integration)
+**目标**: 实施 "Thin Backend" 架构重构，通过 CLI 子命令解耦模型解析逻辑，并提供标准 BI 数据源接口以支持高级可视化。
+
+### 7.1 开发任务
+*   [x] **CLI 扩展**: 实现 `tricys parse` 子命令，支持导出 Modelica 模型参数 Schema。
+*   [x] **模型服务**: 在 Backend 实现 `ModelService`，通过 `subprocess` 调用 `tricys parse` 并缓存结果。
+*   [x] **API 升级**: 实现 `POST /models/parse` 接口。
+*   [x] **BI 集成**: 实现 `POST /tasks/{id}/results/query_bi`，支持 Grafana JSON Datasource 协议。
+*   [x] **架构加固**: 移除 Backend 中直接引用 `tricys.core` 的代码，确保全链路通过 CLI 交互。
+
+### 7.2 测试策略
+*   **集成测试 (Integration)** - 新增 `tests/test_stage7.py`:
+    *   [x] **Case 7.1**: `test_model_parsing` - 上传示例 `.mo` 文件，断言返回的 JSON Schema 字段完整性。
+    *   [x] **Case 7.2**: `test_bi_query` - 模拟 Grafana 查询请求，断言返回的时序数据格式符合预期。
+*   **手动验证 (Manual)**:
+    *   **Grafana**: 搭建本地 Grafana，配置 JSON Datasource 指向 Backend，验证能否画出折线图。(说明：此部分功能已实现，但集成验证推迟到后续阶段)

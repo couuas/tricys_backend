@@ -1,6 +1,6 @@
 import uuid
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from sqlmodel import Field, SQLModel
 from sqlalchemy import Column, JSON
@@ -98,8 +98,9 @@ class Task(TaskBase, table=True):
     workspace_path: Optional[str] = None
     result_path: Optional[str] = None
     pid: Optional[int] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    pid: Optional[int] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     error_msg: Optional[str] = None
 
 class TaskCreate(TaskBase):

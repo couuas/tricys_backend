@@ -18,26 +18,36 @@ Tricys (TRitium Integrated CYcle Simulation) 是一个基于 Python 和 OpenMode
 
 ## 4. 功能性需求 (Functional Requirements)
 
-### 4.1 仿真任务管理 (Simulation Management)
-*   **FR-01 任务提交**: 接收标准 JSON 配置对象，校验后触发 `tricys` 仿真核心。
-*   **FR-02 任务控制**: 支持查询任务状态（Queueing, Running, Completed, Failed）、支持在运行中强制终止任务。
-*   **FR-03 模式支持**: 必须支持 `--enhanced` (编译一次运行多次) 和 `--turbo` 模式的 API 参数开关。
+基于用户体验流程，功能需求分为三个核心阶段：
 
-### 4.2 实时监控 (Real-time Monitoring)
-*   **FR-04 日志流**: 提供 WebSocket 接口，实时推送底层 Python/OpenModelica 的 stdout/stderr 日志。
-*   **FR-05 进度反馈**: 实时推送当前仿真进度（如：当前是第几个 Case，总共多少 Case）。
+### 4.1 仿真前：配置与提交 (Pre-simulation Configuration)
+*   **FR-01 动态模型解析**: 
+    *   后端提供 API 调用 `tricys parse` 子命令，动态解析 Modelica 模型 (`.mo`)。
+    *   返回包含参数名、类型、默认值、单位、注释的 JSON Schema，供前端自动生成配置表单。
+*   **FR-02 标准化配置提交**: 
+    *   接收前端生成的标准 `config.json` 对象。
+    *   后端仅做基本的格式校验，核心业务校验下沉至 CLI。
+*   **FR-03 模式选择**: 支持在提交时选择 `Basic` / `Analysis` 模式，并开关 `--enhanced` / `--turbo` 选项。
 
-### 4.3 数据与结果 (Data & Results)
-*   **FR-06 结果获取**: 任务完成后，提供 API 获取结果文件信息（路径、大小、类型）。
-*   **FR-07 数据可视化服务**: 提供接口直接查询 HDF5 中的时序数据或统计指标（用于前端绘图），**支持按需切片读取 (Data Slicing)**，减少前端解析大文件的压力。
-*   **FR-08 归档管理**: 暴露 `archive` 和 `unarchive` 功能，支持上传/下载归档包。
-*   **FR-11 结果文件浏览**: 支持递归列出工作区内的所有文件结构（类似 IDE 文件树），以便用户查看非标准输出文件。
-*   **FR-12 结果摘要查询**: 直接从后端读取 HDF5 中的 `/summary` 表，返回关键指标（Metrics）摘要，无需下载整个文件。
-*   **FR-13 流式文件传输**: 针对大文件（GB 级）下载，后端必须支持 HTTP Range 请求和流式传输，防止内存溢出。
+### 4.2 仿真中：实时监控 (In-simulation Monitoring)
+*   **FR-04 进程托管与日志管道**: 
+    *   后端通过 `subprocess` 启动仿真，并利用 Pipe 实时捕获 stdout/stderr。
+    *   **无需** 复杂的日志文件轮询，直接转发流式输出。
+*   **FR-05 实时状态推送**: 
+    *   通过 WebSocket (`/ws/tasks/{id}`) 实时广播日志行 (Log Frames)。
+    *   **进度解析**: 后端根据日志中的特定模式（如 `Job X/Y`）解析进度，并推送结构化进度事件 (Progress Events)。
+*   **FR-06 任务控制**: 
+    *   支持随时向子进程发送 `SIGTERM`/`SIGKILL` 以终止仿真。
 
-### 4.4 配置管理 (Configuration)
-*   **FR-09 默认配置获取**: 获取当前版本的标准配置模板。
-*   **FR-10 配置校验**: 在提交任务前对配置进行格式和逻辑校验（Pre-flight Validation）。
+### 4.3 仿真后：结果展示与 BI 集成 (Post-simulation Visualization)
+*   **FR-07 HDF5 数据服务**: 
+    *   提供 API (`/results/query`) 支持对 HDF5 结果文件进行切片查询 (Slicing)，按需读取特定变量或时间段的数据。
+*   **FR-08 BI 工具集成接口**: 
+    *   (New) 提供适配 **Grafana JSON Datasource** 或通用 BI 工具的 API 接口。
+    *   允许外部 BI 工具直接连接 Backend 作为数据源，进行自定义图表展示。
+*   **FR-09 文件管理与归档**: 
+    *   支持递归浏览工作区文件结构。
+    *   支持大文件 (HDF5) 的流式下载 (Range Request) 和归档打包下载 (`tricys archive` wrapper)。
 
 ## 5. 非功能性需求 (Non-Functional Requirements)
 
@@ -53,7 +63,9 @@ Tricys (TRitium Integrated CYcle Simulation) 是一个基于 Python 和 OpenMode
 
 ### 5.3 兼容性 (Compatibility)
 *   **NFR-05 跨平台**: 必须在 Windows（当前主开发环境）上稳定运行，兼容 Linux/Docker 部署。
-*   **NFR-06 无侵入**: 尽量不修改 `tricys` 现有的 `simulation/` 核心代码，而是通过 Wrapper 方式调用。
+*   **NFR-06 架构约束 (Architectural Constraints)**: 
+    *   遵循 **"Thin Backend, Thick CLI"** 原则。
+    *   禁止在 Backend 代码中 import 核心仿真包，必须通过 `tricys` CLI 子命令调用。
 
 ## 6. 风险评估 (Risk Assessment)
 *   **风险 1**: Windows 下 OpenModelica 进程管理复杂，强制杀死进程可能导致 `.lock` 文件残留或 OMC 服务挂死。

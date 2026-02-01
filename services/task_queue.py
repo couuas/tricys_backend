@@ -5,7 +5,7 @@ from tricys_backend.models.task import Task
 from tricys_backend.services.engine import SimulationEngine
 from tricys_backend.services.file_manager import FileManager
 from tricys_backend.core.config import settings
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import create_engine
 import psutil
@@ -59,7 +59,7 @@ class TaskQueue:
                 # Update Task
                 task.status = "RUNNING"
                 task.workspace_path = str(workspace_path)
-                task.updated_at = datetime.utcnow()
+                task.updated_at = datetime.now(timezone.utc)
                 session.add(task)
                 session.commit()
                 session.refresh(task)
@@ -125,7 +125,7 @@ class TaskQueue:
                 task.status = "FAILED"
                 task.error_msg = str(e)
             finally:
-                task.updated_at = datetime.utcnow()
+                task.updated_at = datetime.now(timezone.utc)
                 # Clear PID and cleanup process resources
                 if task.pid:
                     cls._engine_service.cleanup_process(task.pid)

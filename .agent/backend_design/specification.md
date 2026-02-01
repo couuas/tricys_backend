@@ -14,8 +14,18 @@
 
 ### US-01: 提交仿真
 *   **作为** 用户
-*   **我想要** 上传配置 JSON 并启动仿真
-*   **以便** 远程执行计算任务并获取 Task ID。
+*   **我想要** 选择一个 Modelica 模型，自动获取其可配置参数表单，修改并提交仿真
+*   **以便** 无需手动编写 JSON 即可快速启动实验。
+
+### US-06: 动态模型解析 (New)
+*   **作为** 用户
+*   **我想要** 上传或指定一个 `.mo` 库文件，系统能自动解析出其中的模型列表和参数定义
+*   **以便** 在界面上直观地查看和配置模型。
+
+### US-07: BI 工具集成 (New)
+*   **作为** 高级用户
+*   **我想要** 使用 Grafana 直接连接 Tricys Backend 数据源
+*   **以便** 创建自定义的监控仪表盘，实时查看仿真关键指标。
 
 ### US-02: 实时监控
 *   **作为** 用户
@@ -68,6 +78,7 @@ stateDiagram-v2
     *   支持按 Variable Name、Job ID、Time Range 进行切片查询。
     *   返回格式优化为紧凑的 JSON Structure `{"time": [...], "values": [...]}`。
     *   (New in Stage 6) **Metrics Summary**: 直接从 HDF5 的 `/summary` 表读取预计算指标，用于快速概览。
+*   **BI 集成**: (New in Stage 7) 提供兼容通用 BI 工具（如 Grafana JSON Datasource）的查询通过接口。
 
 ### 3.4 通知服务
 *   基于 WebSocket 的 Pub/Sub 模型。

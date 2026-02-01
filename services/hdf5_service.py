@@ -174,3 +174,54 @@ class HDF5ReaderService:
         except Exception as e:
             logger.error(f"Error reading summary metrics for task {task_id}: {str(e)}")
             return []
+
+    def query_results_bi(self, task_id: str, workspace_path: Path, request_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Query results and format for Grafana SimpleJSON Datasource.
+        """
+        targets = request_data.get("targets", [])
+        range_data = request_data.get("range", {})
+        
+        # Parse time range from ISO strings if present
+        start_time = 0.0
+        stop_time = float('inf')
+        # TODO: Parse range["from"] and range["to"] to float seconds if needed.
+        # For now, default to full range or expect backend specific time window logic if implemented.
+        
+        variables = [t.get("target") for t in targets if t.get("target")]
+        if not variables:
+            return []
+            
+        # internal query
+        data_dict = self.query_results(
+            task_id, 
+            workspace_path, 
+            variables=variables,
+            time_range=(start_time, stop_time)
+        )
+        
+        # Transform to Grafana format
+        # data_dict = {"time": [t1, t2...], "var1": [v1, v2...], "job_id": [...]}
+        # Grafana expects timestamp in ms
+        
+        if "time" not in data_dict:
+            return []
+            
+        times_ms = [t * 1000 for t in data_dict["time"]] # Convert seconds to ms
+        
+        response = []
+        for var in variables:
+            if var in data_dict:
+                values = data_dict[var]
+                # datapoints: [[value, timestamp_ms], ...]
+                datapoints = []
+                for v, t in zip(values, times_ms):
+                    datapoints.append([v if pd.notnull(v) else None, t])
+                
+                response.append({
+                    "target": var,
+                    "datapoints": datapoints
+                })
+                
+        return response
+

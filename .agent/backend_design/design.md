@@ -13,11 +13,13 @@ graph TD
         Manager --> Queue[Task Queue (InMemory / Redis)]
         Manager --> DB[(SQLite DB)]
         
-        Manager -- Spawn --> Worker[Simulation Process Worker]
+        Manager --> DB[(SQLite DB)]
+        
+        Manager -- Spawn --> Worker[Subprocess Worker]
     end
     
-    subgraph "Tricys Core"
-        Worker -- CLI/import --> Core[Tricys Simulation Engine]
+    subgraph "Tricys Core (CLI)"
+        Worker -- "tricys basic/analysis/parse" --> Core[Tricys CLI Entry]
         Core -- stdout/stderr --> LogPipe[Log Capture Pipe]
         Core -- write --> FS[File System (HDF5/Logs)]
     end
@@ -58,6 +60,7 @@ tricys_backend/
 │   ├── engine.py        # 核心：子进程管理、日志捕获
 │   ├── file_manager.py  # 文件读写、工作区管理
 │   ├── file_browser.py  # 文件浏览与流式下载服务
+│   ├── model_service.py # (New) 调用 `tricys parse` 解析模型
 │   └── task_queue.py    # 简单的 FIFO 调度器
 └── utils/
     ├── websocket.py     # 连接管理器
@@ -121,3 +124,10 @@ tricys_backend/
 *   `DELETE /api/v1/tasks/{id}` (Stop/Cancel)
 *   `GET /api/v1/tasks/{id}/logs` (History Logs)
 *   `WS /ws/tasks/{id}` (Realtime Logs)
+*   `POST /api/v1/models/parse` (Model Parsing)
+
+## 7. CLI 集成规范 (CLI Integration Rules)
+遵循 **"Thin Backend, Thick CLI"** 原则：
+1.  **仿真运行**: 通过 `subprocess.Popen(["tricys", "basic", "-c", ...])` 调用。
+2.  **模型解析**: 通过 `subprocess.run(["tricys", "parse", ...])` 调用。
+3.  **结果处理**: 优先使用 `tricys` 提供的子命令或标准库读取 HDF5，后端不包含复杂科学计算逻辑。

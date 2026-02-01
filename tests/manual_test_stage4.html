@@ -139,7 +139,7 @@
             const variables = varsStr.split(',').map(s => s.trim()).filter(s => s);
 
             try {
-                const res = await fetch(`${API_BASE}/results/${id}/query`, {
+                const res = await fetch(`${API_BASE}/tasks/${id}/results/query`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

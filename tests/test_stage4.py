@@ -131,7 +131,9 @@ def test_query_multijob_hdf5(api_client):
         
     # Query job 1 and 3
     response = api_client.post(
-        f"/api/v1/results/{task_id}/query", 
+        # Old URL: /results/{task_id}/query
+        # New URL: /tasks/{task_id}/results/query
+        f"/api/v1/tasks/{task_id}/results/query",
         json={"variables": ["val"], "job_ids": [1, 3]}
     )
     

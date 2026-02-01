@@ -12,6 +12,34 @@
     }
     ```
 
+## 1. 模型与配置服务 (Model & Configuration)
+
+### 1.1 动态模型解析
+调用 `tricys parse` 子命令，解析指定 Modelica 模型的参数结构。
+
+*   **Endpoint**: `POST /models/parse`
+*   **Request Body**:
+    ```json
+    {
+      "package_path": "/absolute/path/to/package.mo",
+      "model_name": "example_model.Cycle"
+    }
+    ```
+*   **Response**:
+    ```json
+    [
+      {
+        "name": "blanket.TBR",
+        "type": "Real",
+        "default": 1.1,
+        "description": "Tritium Breeding Ratio...",
+        "unit": "1",
+        "category": "blanket"
+      },
+      ...
+    ]
+    ```
+
 ## 2. 任务管理接口 (Task Management)
 
 ### 2.1 提交仿真任务
@@ -210,3 +238,26 @@
 *   **Endpoint**: `GET /tasks/{task_id}/files/download`
 *   **Query Params**: `path` (relative file path)
 *   **Response**: `application/octet-stream`
+
+### 2.7.4 BI 工具数据源 (Grafana Integration)
+通用查询接口，适配各类 BI 工具（如 Grafana JSON Datasource）。
+
+*   **Endpoint**: `POST /tasks/{task_id}/results/query_bi`
+*   **Request Body**: (参考 Grafana JSON Datasource 协议)
+    ```json
+    {
+      "targets": [
+        {"target": "sds.inventory", "type": "timeseries"}
+      ],
+      "range": {"from": "...", "to": "..."}
+    }
+    ```
+*   **Response**:
+    ```json
+    [
+      {
+        "target": "sds.inventory",
+        "datapoints": [[100.5, 1000], [101.2, 2000], ...]
+      }
+    ]
+    ```

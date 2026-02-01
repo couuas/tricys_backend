@@ -191,7 +191,7 @@
             const end = parseFloat(document.getElementById('timeEnd').value);
 
             try {
-                const res = await fetch(`${API_URL}/results/${taskId}/query`, {
+                const res = await fetch(`${API_URL}/tasks/${taskId}/results/query`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -210,7 +210,7 @@
             const taskId = document.getElementById('taskId').value;
             if (!taskId) return alert("Enter Task ID");
 
-            window.location.href = `${API_URL}/results/${taskId}/download`;
+            window.location.href = `${API_URL}/tasks/${taskId}/archive`;
         }
     </script>
 </body>

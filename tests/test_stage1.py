@@ -23,7 +23,12 @@ def get_session_override():
     with Session(engine) as session:
         yield session
 
-app.dependency_overrides[get_session] = get_session_override
+@pytest.fixture(name="client_fixture")
+def client_fixture_func():
+    app.dependency_overrides[get_session] = get_session_override
+    yield
+    app.dependency_overrides.clear()
+
 
 @pytest.fixture(name="session")
 def session_fixture():
@@ -35,7 +40,7 @@ def session_fixture():
         yield session
 
 @pytest.mark.asyncio
-async def test_simulation_workflow_mocked():
+async def test_simulation_workflow_mocked(client_fixture):
     # Setup mocks for subprocess and psutil
     mock_process = MagicMock()
     mock_process.pid = 99999

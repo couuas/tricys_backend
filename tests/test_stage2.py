@@ -21,7 +21,12 @@ def get_session_override():
     with Session(engine) as session:
         yield session
 
-app.dependency_overrides[get_session] = get_session_override
+@pytest.fixture(name="client_fixture")
+def client_fixture_func():
+    app.dependency_overrides[get_session] = get_session_override
+    yield
+    app.dependency_overrides.clear()
+
 
 @pytest.fixture(name="session")
 def session_fixture():
@@ -33,7 +38,7 @@ def session_fixture():
         yield session
 
 @pytest.mark.asyncio
-async def test_websocket_and_stop():
+async def test_websocket_and_stop(client_fixture):
     # Setup mocks
     mock_process = MagicMock()
     mock_process.pid = 12345
@@ -47,7 +52,7 @@ async def test_websocket_and_stop():
     
     mock_psutil_proc = MagicMock()
     
-    def wait_side_effect():
+    def wait_side_effect(*args, **kwargs):
         stop_event.wait(timeout=5)
         return -15 # SIGTERM exit code
         
@@ -67,7 +72,13 @@ async def test_websocket_and_stop():
         
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             # 1. Create Task
-            response = await client.post("/api/v1/tasks", json={"type": "BASIC", "config_json": {"test": "data"}})
+            response = await client.post("/api/v1/tasks", json={
+                "type": "BASIC", 
+                "config_json": {
+                    "model_name": "TestModel", 
+                    "test": "data"
+                }
+            })
             assert response.status_code == 200
             task_id = response.json()["id"]
             

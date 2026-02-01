@@ -273,7 +273,7 @@
             resultDiv.innerHTML = 'Loading...';
 
             try {
-                const response = await fetch(`${API_BASE}/results/tasks/${taskId}/result_summary`);
+                const response = await fetch(`${API_BASE}/tasks/${taskId}/result_summary`);
                 const data = await response.json();
 
                 if (response.ok) {
@@ -294,7 +294,7 @@
             resultDiv.innerHTML = 'Loading...';
 
             try {
-                const response = await fetch(`${API_BASE}/results/tasks/${taskId}/files`);
+                const response = await fetch(`${API_BASE}/tasks/${taskId}/files`);
                 const data = await response.json();
 
                 if (response.ok) {
@@ -334,7 +334,7 @@
             if (!taskId || !filePath) return alert('Task ID and File Path required');
 
             const encodedPath = encodeURIComponent(filePath);
-            const url = `${API_BASE}/results/tasks/${taskId}/files/${encodedPath}`;
+            const url = `${API_BASE}/tasks/${taskId}/files/download?path=${encodedPath}`;
 
             // Trigger download
             window.open(url, '_blank');

@@ -102,7 +102,7 @@ def test_query_results_csv(api_client):
     df.to_csv(results_dir / "sweep_results.csv", index=False)
     
     response = api_client.post(
-        f"/api/v1/results/{task_id}/query", 
+        f"/api/v1/tasks/{task_id}/results/query", 
         json={"variables": ["speed"], "time_range": [0.0, 1.0]}
     )
     
@@ -131,7 +131,7 @@ def test_query_results_csv_wide_format(api_client):
     
     # Query for "speed"
     response = api_client.post(
-        f"/api/v1/results/{task_id}/query", 
+        f"/api/v1/tasks/{task_id}/results/query", 
         json={"variables": ["speed"], "time_range": [0.0, 1.0]}
     )
     
@@ -171,7 +171,7 @@ def test_query_results_hdf5(api_client):
         store.put('results', df, format='table', data_columns=True)
         
     response = api_client.post(
-        f"/api/v1/results/{task_id}/query", 
+        f"/api/v1/tasks/{task_id}/results/query", 
         json={"variables": ["power"], "time_range": [1.0, 2.0]}
     )
     
@@ -185,7 +185,9 @@ def test_download_archive(api_client):
     task_dir = create_task_record(task_id)
     (task_dir / "data.txt").write_text("hello content")
     
-    response = api_client.get(f"/api/v1/results/{task_id}/download")
+    # Old: /results/{task_id}/download
+    # New: /tasks/{task_id}/archive
+    response = api_client.get(f"/api/v1/tasks/{task_id}/archive")
     
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tricys Backend Manual Test - Stage 7</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        .success { color: green; font-weight: bold; }
+        .error { color: red; font-weight: bold; }
+        .box { border: 1px solid #ccc; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        label { display: block; margin-top: 10px; }
+        textarea { width: 100%; height: 100px; }
+        button { padding: 10px 20px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #0056b3; }
+        pre { background: #f0f0f0; padding: 10px; overflow-x: auto; max-height: 300px; }
+    </style>
+</head>
+<body>
+    <h1>Stage 7: Pre-simulation & BI Integration</h1>
+    
+    <div class="box">
+        <h2>1. Model Parsing (Pre-simulation)</h2>
+        <p>Test the dynamic model parsing capability.</p>
+        <label>Package Path (.mo file):</label>
+        <input type="text" id="modelPath" value="d:\Administrator\Documents\Github\tricys\example\example_model_single\example_model.mo" style="width: 80%;">
+        
+        <label>Model Name:</label>
+        <input type="text" id="modelName" value="example_model.Cycle">
+        
+        <br><br>
+        <button onclick="parseModel()">Parse Model</button>
+        
+        <pre id="parseResult">waiting...</pre>
+    </div>
+
+    <div class="box">
+        <h2>2. BI Query (Post-simulation)</h2>
+        <p>Test the Grafana-compatible BI query interface.</p>
+        <label>Task ID:</label>
+        <input type="text" id="taskId" placeholder="Enter a completed task ID here">
+        
+        <label>Query JSON (Grafana Format):</label>
+        <textarea id="biQuery">
+{
+  "targets": [
+    {"target": "sds.inventory"}
+  ],
+  "range": {
+    "from": "2023-01-01T00:00:00Z",
+    "to": "2023-01-01T01:00:00Z"
+  }
+}
+        </textarea>
+        
+        <br><br>
+        <button onclick="queryBI()">Query BI Data</button>
+        
+        <pre id="biResult">waiting...</pre>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000/api/v1';
+
+        async function parseModel() {
+            const path = document.getElementById('modelPath').value;
+            const name = document.getElementById('modelName').value;
+            const output = document.getElementById('parseResult');
+            
+            output.textContent = 'Parsing...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/models/parse`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        package_path: path,
+                        model_name: name
+                    })
+                });
+                
+                const data = await response.json();
+                output.textContent = JSON.stringify(data, null, 2);
+            } catch (err) {
+                output.textContent = 'Error: ' + err.message;
+            }
+        }
+
+        async function queryBI() {
+            const taskId = document.getElementById('taskId').value;
+            if (!taskId) {
+                alert("Please enter a Task ID first (run a simulation to get one).");
+                return;
+            }
+            
+            const queryJson = document.getElementById('biQuery').value;
+            const output = document.getElementById('biResult');
+            
+            output.textContent = 'Querying...';
+            
+            try {
+                // Parse the JSON from textarea
+                let bodyObj;
+                try {
+                     bodyObj = JSON.parse(queryJson);
+                } catch(e) {
+                    alert("Invalid JSON in textarea");
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/tasks/${taskId}/results/query_bi`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(bodyObj)
+                });
+                
+                const data = await response.json();
+                output.textContent = JSON.stringify(data, null, 2);
+            } catch (err) {
+                output.textContent = 'Error: ' + err.message;
+            }
+        }
+    </script>
+</body>
+</html>
