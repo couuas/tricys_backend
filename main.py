@@ -1,5 +1,7 @@
 import asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from tricys_backend.core.config import settings
@@ -7,90 +9,87 @@ from tricys_backend.api.v1.api import api_router
 from tricys_backend.utils.db import create_db_and_tables
 from tricys_backend.services.task_queue import TaskQueue
 
-async def recover_orphaned_tasks():
+# Global Exception Handlers
+async def validation_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=400,
+        content={"code": "VALIDATION_ERROR", "message": str(exc)},
+    )
+
+async def generic_exception_handler(request: Request, exc: Exception):
+    import logging
+    logging.getLogger("uvicorn.error").error(f"Unhandled error: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"code": "INTERNAL_ERROR", "message": "An internal error occurred."},
+    )
+
+async def recover_tasks():
     """
-    Scan database for tasks stuck in RUNNING state and mark them as FAILED.
-    This handles server crashes where processes may have been lost.
+    Recover orphaned RUNNING tasks and requeue PENDING tasks.
     """
     import logging
     from sqlmodel import Session, select
     from tricys_backend.models.task import Task
-    from tricys_backend.services.task_queue import db_engine
+    from tricys_backend.services.task_queue import db_engine, TaskQueue
     import psutil
     
     logger = logging.getLogger(__name__)
-    logger.info("Starting orphaned task recovery...")
+    logger.info("Starting task recovery...")
     
     with Session(db_engine) as session:
-        running_tasks = session.exec(
-            select(Task).where(Task.status == "RUNNING")
-        ).all()
-        
+        # 1. Recover Orphaned RUNNING Tasks
+        running_tasks = session.exec(select(Task).where(Task.status == "RUNNING")).all()
         recovered_count = 0
         for task in running_tasks:
             # Check if process still exists
-            if not task.pid:
-                # No PID recorded, mark as failed
-                task.status = "FAILED"
-                task.error_msg = "Process lost: No PID recorded"
-                recovered_count += 1
-            else:
+            is_alive = False
+            process_obj = None
+            if task.pid and psutil.pid_exists(task.pid):
                 try:
-                    # Check if PID exists
-                    if psutil.pid_exists(task.pid):
-                        # Verify it's actually a tricys process to detect PID reuse
-                        try:
-                            proc = psutil.Process(task.pid)
-                            cmdline = " ".join(proc.cmdline()).lower()
-                            # Check for tricys executable specifically (not just substring match)
-                            is_tricys = False
-                            if "tricys" in cmdline:
-                                # Verify it's the actual tricys command, not just in a path
-                                parts = proc.cmdline()
-                                if parts and ("tricys" in parts[0] or any("tricys" in p and ("basic" in cmdline or "analysis" in cmdline) for p in parts)):
-                                    is_tricys = True
-                            
-                            if not is_tricys:
-                                # PID reused by different process
-                                task.status = "FAILED"
-                                task.error_msg = "Process lost: PID reuse detected"
-                                task.pid = None
-                                recovered_count += 1
-                            else:
-                                logger.warning(f"Task {task.id} still running with PID {task.pid}")
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            task.status = "FAILED"
-                            task.error_msg = "Process lost: Cannot access process"
-                            task.pid = None
-                            recovered_count += 1
-                    else:
-                        # Process doesn't exist
-                        task.status = "FAILED"
-                        task.error_msg = "Process lost during server restart"
-                        task.pid = None
-                        recovered_count += 1
-                except Exception as e:
-                    logger.error(f"Error checking task {task.id}: {e}")
-                    task.status = "FAILED"
-                    task.error_msg = f"Recovery error: {str(e)}"
-                    task.pid = None
-                    recovered_count += 1
+                    proc = psutil.Process(task.pid)
+                    cmdline = " ".join(proc.cmdline()).lower()
+                    if "tricys" in cmdline:
+                        is_alive = True
+                        process_obj = proc
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
             
+            if is_alive and process_obj:
+                 logger.warning(f"Killing orphaned task {task.id} (PID {task.pid})")
+                 try:
+                     process_obj.terminate()
+                     # Give it a moment, but don't block startup too long
+                 except Exception:
+                     pass
+            
+            # Always mark as FAILED because the LogReader and Waiter threads are lost
+            task.status = "FAILED"
+            task.error_msg = "Task interrupted by server restart"
+            task.pid = None
             session.add(task)
-        
+            recovered_count += 1
+                 
+        # 2. Re-queue PENDING Tasks
+        pending_tasks = session.exec(select(Task).where(Task.status == "PENDING")).all()
+        requeued_count = 0
+        for task in pending_tasks:
+            # Re-add to asyncio Queue
+            await TaskQueue.add_task(task.id)
+            requeued_count += 1
+            
         session.commit()
-        logger.info(f"Orphaned task recovery complete: {recovered_count} tasks recovered")
+        logger.info(f"Recovery complete: {recovered_count} failed orphaned, {requeued_count} requeued pending")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     create_db_and_tables()
     
-    # Recover orphaned tasks from previous server runs
-    await recover_orphaned_tasks()
+    # Recover tasks
+    await recover_tasks()
     
     # Start TaskQueue worker in background
-    # We use asyncio.create_task to run the worker loop
     worker_task = asyncio.create_task(TaskQueue.worker())
     
     # Start Cleanup Service
@@ -114,6 +113,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Exception Handlers
+from fastapi.exceptions import RequestValidationError
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
+
+# Configure Logging
+import logging
+import sys
+
+# Setup root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(settings.BASE_DIR / "backend.log", encoding='utf-8')
+    ]
+)
+
+# Silence watchfiles to prevent infinite loop if log file triggers reload
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+
 from fastapi.middleware.cors import CORSMiddleware
 
 # CORS configuration
@@ -130,6 +152,16 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# Mount static assets
+assets_dir = settings.BASE_DIR / "assets"
+assets_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=assets_dir), name="static")
+
+# Mount workspaces for serving custom model files
+workspaces_dir = settings.WORKSPACES_DIR
+workspaces_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=workspaces_dir), name="assets")
 
 @app.get("/health")
 def health_check():

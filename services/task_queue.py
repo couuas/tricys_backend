@@ -1,14 +1,18 @@
 import asyncio
 import logging
 from sqlmodel import Session, select
+from tricys_backend.models.project import Project
 from tricys_backend.models.task import Task
 from tricys_backend.services.engine import SimulationEngine
 from tricys_backend.services.file_manager import FileManager
+from tricys_backend.services.connection_manager import manager # Import ConnectionManager
 from tricys_backend.core.config import settings
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import create_engine
 import psutil
+import shutil
+import os
 
 # We need a separate engine for the worker thread/loop
 db_engine = create_engine(settings.DATABASE_URL)
@@ -23,6 +27,8 @@ class TaskQueue:
     async def add_task(cls, task_id: str):
         await cls._queue.put(task_id)
         logger.info(f"Task {task_id} added to queue")
+        # Notify clients
+        await manager.broadcast_to_task(task_id, {"type": "status", "status": "PENDING"})
 
     @classmethod
     async def worker(cls):
@@ -49,12 +55,65 @@ class TaskQueue:
 
             if task.status == "STOPPED":
                 logger.info(f"Task {task_id} was stopped before execution.")
+                await manager.broadcast_to_task(task_id, {"type": "status", "status": "STOPPED"})
+                return
+
+            logger.info(f"TaskQueue processing: {task_id}. Enhanced={task.enhanced}, Turbo={task.turbo}")
+            await manager.broadcast_to_task(task_id, {"type": "status", "status": "RUNNING"})
+            
+            # Fetch Project (required for workspace and model path)
+            project = session.get(Project, task.project_id)
+            if not project:
+                logger.error(f"Project {task.project_id} not found for task {task_id}")
+                task.status = "FAILED"
+                task.error_msg = "Associated project not found"
+                session.add(task)
+                session.commit()
+                await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": "Project not found"})
                 return
 
             try:
                 # 1. Prepare Workspace
-                workspace_path = FileManager.create_workspace(task_id)
-                config_path = FileManager.save_config(workspace_path, task.config_json)
+                is_analysis = (task.type == "analysis")
+                workspace_path = FileManager.create_workspace(task_id, task.project_id, is_analysis=is_analysis)
+                
+                # Determine Config Content
+                if is_analysis and "analysis_spec" in task.config_json:
+                     # Unwrap analysis spec to be the root config
+                     config = task.config_json["analysis_spec"]
+                else:
+                     config = task.config_json
+                
+                # 2. Setup Model File
+                if project.model_file_path:
+                    source_path = Path(project.model_file_path)
+                    
+                    if source_path.exists():
+                        # Copy to task workspace
+                        dest_path = workspace_path / source_path.name
+                        try:
+                            shutil.copy2(source_path, dest_path)
+                            
+                            # Update config to use local file name
+                            if "paths" not in config: config["paths"] = {}
+                            
+                            # For Analysis, the engine might expect package_path to run the model
+                            # The model file is now in the current working directory (workspace_path)
+                            # So just filename is enough
+                            config["paths"]["package_path"] = source_path.name
+                            
+                            # Also ensure 'simulation' block has model_name if missing?
+                            # Usually supplied by template/form.
+                            
+                            logger.info(f"Copied model from {source_path} to {dest_path}")
+                        except Exception as exc:
+                             logger.error(f"Failed to copy model file: {exc}")
+                             raise exc
+                    else:
+                        logger.error(f"Source model file missing: {source_path}")
+                        raise FileNotFoundError(f"Source model file not found at {source_path}")
+
+                config_path = FileManager.save_config(workspace_path, config)
                 
                 # Update Task
                 task.status = "RUNNING"
@@ -64,13 +123,9 @@ class TaskQueue:
                 session.commit()
                 session.refresh(task)
 
-                # 2. Run Engine (Blocking call for subprocess spawn, but we need to wait for it?)
-                # Stage 1: MVP can block the worker (since it's a queue).
-                # But wait, os.system blocks? Popen doesn't.
-                # Use engine to spawn, then wait.
-                
+                # 3. Run Engine
                 pid, error = cls._engine_service.run_task(
-                    task_id, # Added task_id
+                    task_id, 
                     workspace_path, 
                     config_path, 
                     task.type, 
@@ -83,57 +138,43 @@ class TaskQueue:
                     task.error_msg = error
                     session.add(task)
                     session.commit()
+                    await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": error})
                     return
 
                 task.pid = pid
                 session.add(task)
                 session.commit()
                 
-                # 3. Wait for completion (Simple polling for MVP)
-                # In Stage 2 we do async stream reading.
-                # Here we just wait. SimulationEngine.run_task returns Popen?
-                # Ah, I defined run_task to return (pid, error). I lost the Popen object reference.
-                # I should modify run_task to wait or return Popen.
-                # Or use `os.waitpid(pid, 0)` if os supports it.
-                # Better: `SimulationEngine` should probably have a `run_and_wait` or return Popen.
-                
-                # Let's use psutil or plain os polling.
-                # Actually, blocking the async worker loop with `os.waitpid` is bad if we want concurrency > 1.
-                # But Stage 1 Requirement says "FIFO Task Queue", so 1 concurrency is fine.
-                # We can run `await asyncio.to_thread(wait_for_process, pid)`
-                
+                # 4. Wait for completion
                 try:
                     p = psutil.Process(pid)
-                    # Poll in loop to allow cancellation logic later?
-                    # For now just wait.
+                    # Poll while process is running to stream logs?
+                    # For MVP, we wait.
                     exit_code = await asyncio.to_thread(p.wait)
                     
                     if exit_code == 0:
                         task.status = "COMPLETED"
-                        # Assume default result path
+                        # Standard sweep results name
                         task.result_path = str(workspace_path / "sweep_results.h5") 
+                        await manager.broadcast_to_task(task_id, {"type": "status", "status": "COMPLETED"})
                     else:
                         task.status = "FAILED"
                         task.error_msg = f"Process exited with code {exit_code}"
+                        await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": f"Exit code {exit_code}"})
                         
                 except psutil.NoSuchProcess:
-                    # Already finished?
                     task.status = "FAILED"
                     task.error_msg = "Process disappeared unexpectedly"
+                    await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": "Process disappeared"})
                     
             except Exception as e:
                 task.status = "FAILED"
                 task.error_msg = str(e)
+                await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": str(e)})
             finally:
                 task.updated_at = datetime.now(timezone.utc)
-                # Clear PID and cleanup process resources
                 if task.pid:
                     cls._engine_service.cleanup_process(task.pid)
                 task.pid = None
                 session.add(task)
                 session.commit()
-
-    @classmethod
-    def stop_task(cls, pid: int) -> bool:
-        """Stops the task with the given PID."""
-        return cls._engine_service.stop_task(pid)

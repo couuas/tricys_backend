@@ -1,33 +1,39 @@
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+from sqlmodel import Session
 
 from tricys_backend.services.model_service import ModelService
+from tricys_backend.services.project_service import ProjectService
+from tricys_backend.utils.db import get_session
+from tricys_backend.models.user import User
+from tricys_backend.models.project import Project
+from tricys_backend.api.deps import get_current_user
 
 router = APIRouter()
 
 class ParseModelRequest(BaseModel):
-    package_path: str
+    project_id: str
     model_name: str
 
-class ModelParameter(BaseModel):
-    name: str
-    type: str
-    defaultValue: Optional[Any] = None
-    description: Optional[str] = None
-    # Add other fields as needed based on CLI output
-
 @router.post("/models/parse", response_model=List[Dict[str, Any]])
-async def parse_model(request: ParseModelRequest):
+async def parse_model(
+    request: ParseModelRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
     """
-    Parses a Modelica model and returns its parameters.
-    Invokes 'tricys parse' via subprocess.
+    Parses a Modelica model from a project and returns its parameters.
     """
-    try:
-        # Validate file existence is handled by CLI or Service? 
-        # Service handles execution, CLI handles file check.
+    project = session.get(Project, request.project_id)
+    if not project or project.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this project")
+    
+    if not project.model_file_path:
+        raise HTTPException(status_code=400, detail="Project has no model file")
         
-        parameters = ModelService.parse_model(request.package_path, request.model_name)
+    try:
+        parameters = ModelService.parse_model(project.model_file_path, request.model_name)
         return parameters
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

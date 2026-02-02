@@ -134,11 +134,10 @@ class SimulationEngine:
         cmd = ["tricys"]
         
         # Add arguments
-        # Command map: BASIC -> basic, ANALYSIS -> analysis
-        subcommand = "basic" if task_type == "BASIC" else "analysis"
-        
-        # Construct command: tricys basic -c config.json [--enhanced] [--turbo]
-        cmd.extend([subcommand, "-c", str(config_path)])
+        # Add arguments
+        # Tricys auto-detects mode based on config content
+        # Construct command: tricys -c config.json [--enhanced] [--turbo]
+        cmd.extend(["-c", str(config_path)])
         
         if enhanced:
             cmd.append("--enhanced")

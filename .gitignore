@@ -24,3 +24,7 @@ dist/
 **/workspaces/*
 
 **/*.db
+
+**/*.log
+
+assets/

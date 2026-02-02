@@ -20,6 +20,7 @@ class CleanupService:
         """
         Scans workspace and deletes directories older than retention period.
         Now checks database to ensure only completed/failed/stopped tasks are cleaned up.
+        Adapts to structure: workspaces/{project_id}/tasks/{task_id}
         """
         if not self.workspace_path.exists():
             return
@@ -44,13 +45,22 @@ class CleanupService:
                 eligible_task_ids = {task.id for task in eligible_tasks}
                 logger.info(f"Found {len(eligible_task_ids)} eligible tasks for cleanup in database")
             
-            # Scan workspace directories
-            for date_dir in self.workspace_path.iterdir():
-                if not date_dir.is_dir():
+            # Scan Project directories
+            for project_dir in self.workspace_path.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                
+                # Protected directories
+                if project_dir.name == "session":
+                    continue
+                
+                # Check for tasks directory
+                tasks_root = project_dir / "tasks"
+                if not tasks_root.exists() or not tasks_root.is_dir():
                     continue
                     
-                # Iterate through task directories within each date directory
-                for task_dir in date_dir.iterdir():
+                # Iterate through task directories
+                for task_dir in tasks_root.iterdir():
                     if not task_dir.is_dir():
                         continue
                     
@@ -70,15 +80,11 @@ class CleanupService:
                             logger.error(f"Failed to delete {task_id}: {e}")
                     elif is_old_enough and task_id not in eligible_task_ids:
                         # Old but not in database or not in terminal state - skip with warning
-                        logger.warning(f"Skipping cleanup of {task_id}: not in eligible state or not in database")
+                        # Could be orphaned or still running (if DB desync)
+                        pass
                 
-                # Clean up empty date directories
-                try:
-                    if date_dir.is_dir() and not any(date_dir.iterdir()):
-                        date_dir.rmdir()
-                        logger.info(f"Removed empty date directory: {date_dir.name}")
-                except Exception as e:
-                    logger.debug(f"Could not remove date directory {date_dir.name}: {e}")
+                # Clean up empty tasks directories if needed? 
+                # Probably keep them to avoid errors if new tasks start
                             
             logger.info(f"Cleanup finished. Removed {count} old workspaces.")
             

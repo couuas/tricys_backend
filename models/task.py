@@ -2,9 +2,12 @@ import uuid
 import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, SQLModel, Relationship
 from sqlalchemy import Column, JSON
 from pydantic import BaseModel, field_validator, model_validator
+
+if False: # TYPE_CHECKING
+    from tricys_backend.models.project import Project
 
 # Config validation models
 class PathsConfig(BaseModel):
@@ -52,6 +55,10 @@ class ConfigJsonSchema(BaseModel):
     simulation_parameters: Optional[Dict[str, List[Any]]] = None
     model_name: Optional[str] = None
     
+    # [NEW] Enhanced validation fields
+    active_alerts: Optional[List[Dict[str, Any]]] = None
+    metrics_definition: Optional[Dict[str, Any]] = None
+    
     @field_validator('model_name')
     @classmethod
     def validate_model_name(cls, v: Optional[str]) -> Optional[str]:
@@ -94,16 +101,20 @@ class TaskBase(SQLModel):
 
 class Task(TaskBase, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(foreign_key="project.id")
     status: str = Field(default="PENDING")
     workspace_path: Optional[str] = None
     result_path: Optional[str] = None
     pid: Optional[int] = None
-    pid: Optional[int] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     error_msg: Optional[str] = None
+    
+    project: Optional["Project"] = Relationship(back_populates="tasks")
 
 class TaskCreate(TaskBase):
+    project_id: str
+
     @field_validator("config_json")
     @classmethod
     def validate_config_schema(cls, v: dict) -> dict:
@@ -138,6 +149,7 @@ class TaskCreate(TaskBase):
 
 class TaskRead(TaskBase):
     id: str
+    project_id: str
     status: str
     created_at: datetime
     updated_at: datetime
