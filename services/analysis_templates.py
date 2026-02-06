@@ -10,7 +10,7 @@ class AnalysisTemplates:
                 "description": "Sweep a single variable across a defined range.",
                 "icon": "📈",
                 "schema": {
-                    "independent_variable": {"type": "string", "label": "Parameter to Sweep", "placeholder": "e.g. plasma.nf"},
+                    "independent_variable": {"type": "param_selector", "label": "Parameter to Sweep", "placeholder": "e.g. plasma.nf"},
                     "sampling_method": {"type": "csv", "label": "Values (comma separated)", "placeholder": "0.1, 0.2, 0.3"},
                     "target_kpis": {"type": "csv", "label": "Target KPIs", "default": "Startup_Inventory, Doubling_Time"}
                 }
@@ -83,7 +83,17 @@ class AnalysisTemplates:
         Converts the simplified form_data from UI into the complex logic-ready config.json structure.
         """
         # Base Analysis Structure
+        sim_settings = form_data.get("simulation_settings", {})
+        
         base_config = {
+            "simulation": {
+                "model_name": sim_settings.get("modelName", "example_model.Cycle"),
+                "stop_time": float(sim_settings.get("stopTime", 2000.0)),
+                "step_size": float(sim_settings.get("stepSize", 0.1)),
+                "parameters": form_data.get("parameter_overrides", {}),
+                # variableFilter might need default or input?
+                "variableFilter": "time|sds.I[1]" # Default filter for now
+            },
             "sensitivity_analysis": {
                 "enabled": True,
                 "analysis_cases": [],

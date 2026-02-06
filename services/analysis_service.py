@@ -46,7 +46,7 @@ class AnalysisService:
         with Session(db_engine) as session:
             new_task = Task(
                 name=name,
-                type="analysis",
+                type="ANALYSIS",
                 status="PENDING",
                 # user_id=user_id, # Removed as field doesn't exist
                 project_id=project_id,
@@ -72,7 +72,7 @@ class AnalysisService:
         with Session(db_engine) as session:
             # Filter by Project Owner = user_id
             # This ensures users only see tasks for their own projects
-            query = select(Task).join(Project).where(Project.user_id == user_id, Task.type == "analysis")
+            query = select(Task).join(Project).where(Project.user_id == user_id, Task.type == "ANALYSIS")
             
             if project_id:
                 query = query.where(Task.project_id == project_id)

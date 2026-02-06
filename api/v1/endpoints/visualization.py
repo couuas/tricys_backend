@@ -1,9 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends, Body
+from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 import json
+import pandas as pd
+import subprocess
+import threading
+import time
+import socket
+
+def find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
 
 from tricys_backend.utils.db import get_session
 from tricys_backend.models.task import Task
@@ -15,12 +25,27 @@ from tricys_backend.services.file_browser_service import FileBrowserService
 from tricys_backend.services.hdf5_service import HDF5ReaderService
 from tricys_backend.services.archive_service import ArchiveService
 from tricys_backend.services.ai_service import AIService
+from tricys.visualizer.filtering import filter_dataframe
 
 router = APIRouter()
 
 file_browser = FileBrowserService()
 hdf5_service = HDF5ReaderService()
 archive_service = ArchiveService()
+
+_HDF5_PROC_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+def _terminate_process(task_id: str):
+    entry = _HDF5_PROC_REGISTRY.get(task_id)
+    if not entry:
+        return
+    proc = entry.get("process")
+    try:
+        if proc and proc.poll() is None:
+            proc.terminate()
+    except Exception:
+        pass
+    _HDF5_PROC_REGISTRY.pop(task_id, None)
 
 def get_task_workspace(task_id: str, session: Session, current_user: User) -> Path:    
     """Helper to get and validate task workspace path with ownership check."""
@@ -79,6 +104,37 @@ def download_task_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve file: {str(e)}")
 
+@router.get("/tasks/{task_id}/files/content")
+def get_task_file_content(
+    task_id: str,
+    path: str,
+    max_bytes: int = Query(200000, ge=1000, le=2000000),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Return text content for preview with size limit."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        full_path = file_browser.get_file_path(workspace_path, path)
+        with open(full_path, "rb") as f:
+            data = f.read(max_bytes + 1)
+        truncated = len(data) > max_bytes
+        if truncated:
+            data = data[:max_bytes]
+        content = data.decode("utf-8", errors="replace")
+        return {
+            "path": path,
+            "size": full_path.stat().st_size,
+            "truncated": truncated,
+            "content": content
+        }
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+
 @router.get("/tasks/{task_id}/archive", response_class=FileResponse)
 def download_task_archive(
     task_id: str,
@@ -98,6 +154,393 @@ def download_task_archive(
         raise HTTPException(status_code=500, detail=f"Error creating archive: {str(e)}")
 
 # --- Results & Visualization ---
+
+@router.get("/tasks/{task_id}/visualizer/metadata")
+def get_visualizer_metadata(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Get HDF5 visualizer metadata (variables, parameters, jobs table, config, logs)."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        return hdf5_service.get_visualizer_metadata(task_id, workspace_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load visualizer metadata: {str(e)}")
+
+@router.get("/tasks/{task_id}/visualizer/jobs")
+def get_visualizer_jobs(
+    task_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = Query("asc"),
+    filter: Optional[str] = None,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Get paginated jobs table for visualizer with optional filter/sort."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        jobs_df = hdf5_service.get_jobs_df(task_id, workspace_path)
+        if jobs_df.empty:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0}
+
+        # Normalize id field for frontend
+        if "job_id" in jobs_df.columns:
+            jobs_df = jobs_df.rename(columns={"job_id": "id"})
+
+        # Filter
+        if filter:
+            try:
+                jobs_df = filter_dataframe(jobs_df, filter)
+            except Exception:
+                pass
+
+        # Sort
+        if sort_by and sort_by in jobs_df.columns:
+            ascending = str(sort_dir).lower() != "desc"
+            jobs_df = jobs_df.sort_values(by=sort_by, ascending=ascending)
+
+        total = len(jobs_df)
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = jobs_df.iloc[start:end].to_dict("records")
+
+        return {"items": items, "page": page, "page_size": page_size, "total": total}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load jobs: {str(e)}")
+
+
+@router.get("/tasks/{task_id}/visualizer/series")
+def get_visualizer_series(
+    task_id: str,
+    job_ids: Optional[str] = None,
+    vars: Optional[str] = None,
+    limit: int = Query(2000, ge=1, le=200000),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Get time series data for selected job_ids and variables."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        parsed_job_ids = [int(j) for j in job_ids.split(",") if j.strip()] if job_ids else []
+        parsed_vars = [v for v in vars.split(",") if v.strip()] if vars else []
+
+        data_dict = hdf5_service.query_results(
+            task_id=task_id,
+            workspace_path=workspace_path,
+            variables=parsed_vars,
+            job_ids=parsed_job_ids,
+            limit=limit,
+        )
+
+        if "time" not in data_dict:
+            return {"records": []}
+
+        df = pd.DataFrame(data_dict)
+        return {"records": df.to_dict("records")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load series: {str(e)}")
+
+
+@router.get("/tasks/{task_id}/visualizer/metrics")
+def get_visualizer_metrics(
+    task_id: str,
+    job_ids: Optional[str] = None,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Get summary metrics for selected job_ids from /summary."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
+        if not metrics:
+            return {"records": []}
+
+        if job_ids:
+            target_ids = {int(j) for j in job_ids.split(",") if j.strip()}
+            metrics = [m for m in metrics if int(m.get("job_id", -1)) in target_ids]
+
+        return {"records": metrics}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load metrics: {str(e)}")
+
+
+@router.get("/tasks/{task_id}/visualizer/config")
+def get_visualizer_config(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Get config data from HDF5."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        data = hdf5_service.get_config_log(task_id, workspace_path)
+        return {"config": data.get("config_data")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load config: {str(e)}")
+
+
+@router.get("/tasks/{task_id}/visualizer/log")
+def get_visualizer_log(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Get log data from HDF5."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        data = hdf5_service.get_config_log(task_id, workspace_path)
+        return {"log": data.get("log_data")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load log: {str(e)}")
+
+
+@router.post("/tasks/{task_id}/visualizer/hdf5/open")
+def open_hdf5_visualizer(
+    task_id: str,
+    payload: Dict[str, Any] = Body(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Launch `tricys hdf5 <file>` and track the process to avoid lingering instances."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    file_path = payload.get("path")
+    if not file_path:
+        raise HTTPException(status_code=400, detail="Missing file path")
+
+    full_path = file_browser.get_file_path(workspace_path, file_path)
+    if full_path.suffix.lower() != ".h5":
+        raise HTTPException(status_code=400, detail="Only .h5 files are supported")
+
+    # Terminate any existing process for this task
+    _terminate_process(task_id)
+
+    try:
+        port = find_free_port()
+        proc = subprocess.Popen(
+            ["tricys", "hdf5", str(full_path), "--port", str(port)],
+            cwd=str(workspace_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        )
+
+        # Auto-terminate after 10 minutes
+        timer = threading.Timer(600, lambda: _terminate_process(task_id))
+        timer.daemon = True
+        timer.start()
+
+        _HDF5_PROC_REGISTRY[task_id] = {
+            "process": proc,
+            "pid": proc.pid,
+            "port": port,
+            "file": str(full_path),
+            "started_at": time.time(),
+            "timer": timer,
+        }
+
+        return {"status": "started", "pid": proc.pid, "port": port}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start visualizer: {str(e)}")
+
+
+@router.get("/tasks/{task_id}/visualizer/hdf5/status")
+def get_hdf5_status(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Check status of running hdf5 visualizer process."""
+    _ = get_task_workspace(task_id, session, current_user)
+    entry = _HDF5_PROC_REGISTRY.get(task_id)
+    if not entry:
+        return {"running": False}
+
+    proc = entry.get("process")
+    running = proc is not None and proc.poll() is None
+    if not running:
+        _terminate_process(task_id)
+        return {"running": False}
+
+    return {
+        "running": True,
+        "pid": proc.pid,
+        "file": entry.get("file"),
+        "started_at": entry.get("started_at")
+    }
+
+
+@router.get("/tasks/visualizer/stats")
+def get_visualizer_stats(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get aggregate statistics of result files across all completed tasks.
+    Counts .h5, .svg, and .md files in task workspaces.
+    """
+    statement = (
+        session.query(Task)
+        .join(Project)
+        .filter(Project.user_id == current_user.id)
+        .filter(Task.status == "COMPLETED")
+    )
+    tasks = statement.all()
+    
+    stats = {
+        "total_tasks": len(tasks),
+        "h5": 0,
+        "svg": 0,
+        "md": 0
+    }
+    
+    for task in tasks:
+        if not task.workspace_path:
+            continue
+        ws = Path(task.workspace_path)
+        if not ws.exists():
+            continue
+            
+        try:
+            # Recursively count files
+            # rglob iterates recursively
+            # converting to list to get length
+            stats["h5"] += sum(1 for _ in ws.rglob("*.h5"))
+            stats["svg"] += sum(1 for _ in ws.rglob("*.svg"))
+            stats["md"] += sum(1 for _ in ws.rglob("*.md"))
+        except Exception:
+            pass
+            
+    return stats
+
+
+@router.get("/tasks/visualizer/hdf5/processes")
+def get_active_hdf5_processes(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get list of all active HDF5 visualizer processes managed by this server.
+    Cleaning up dead processes on the fly.
+    """
+    active_procs = []
+    # Identify dead tasks to cleanup
+    dead_tasks = []
+
+    for task_id, entry in _HDF5_PROC_REGISTRY.items():
+        proc = entry.get("process")
+        if proc and proc.poll() is None:
+            # Fetch Task Name
+            task_name = "Unknown Task"
+            try:
+                task = session.get(Task, task_id)
+                if task:
+                    task_name = task.name
+            except Exception:
+                pass
+
+            active_procs.append({
+                "task_id": task_id,
+                "task_name": task_name,
+                "pid": proc.pid,
+                "port": entry.get("port"),
+                "file": entry.get("file"),
+                "started_at": entry.get("started_at")
+            })
+        else:
+            dead_tasks.append(task_id)
+
+    # Cleanup registry
+    for tid in dead_tasks:
+        _terminate_process(tid)
+
+    return active_procs
+
+
+@router.post("/tasks/{task_id}/visualizer/hdf5/stop")
+def stop_hdf5_visualizer(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Stop running hdf5 visualizer process for a task."""
+    _ = get_task_workspace(task_id, session, current_user)
+    _terminate_process(task_id)
+    return {"status": "stopped"}
+
+
+@router.post("/tasks/{task_id}/visualizer/export")
+def export_visualizer_data(
+    task_id: str,
+    payload: Dict[str, Any] = Body(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Export results data in wide or long CSV format."""
+    workspace_path = get_task_workspace(task_id, session, current_user)
+    try:
+        fmt = str(payload.get("format", "wide")).lower()
+        job_ids = payload.get("job_ids") or []
+
+        hdf5_file = hdf5_service.resolve_hdf5_file(task_id, workspace_path)
+        if not hdf5_file:
+            raise HTTPException(status_code=404, detail="HDF5 results file not found")
+
+        # Load results
+        where_clause = None
+        if job_ids:
+            jids = [int(j) for j in job_ids]
+            where_clause = f"job_id in {jids}"
+
+        df = pd.read_hdf(hdf5_file, "results", where=where_clause)
+        if df.empty:
+            raise HTTPException(status_code=400, detail="No results data to export")
+
+        # Load jobs params
+        jobs_df = hdf5_service.get_jobs_df(task_id, workspace_path)
+        if "job_id" in jobs_df.columns:
+            jobs_df = jobs_df.rename(columns={"job_id": "job_id"})
+
+        if fmt == "long":
+            params = jobs_df.rename(columns={"job_id": "job_id"}) if not jobs_df.empty else None
+            if params is not None and not params.empty:
+                df = pd.merge(df, params, on="job_id", how="left")
+
+            suffix = "long"
+            export_df = df
+        else:
+            # Wide format: time as index, columns per job + variable
+            export_df = pd.DataFrame({"time": df["time"].unique()}).sort_values("time")
+            for job_id in df["job_id"].unique():
+                params = None
+                if not jobs_df.empty:
+                    row = jobs_df[jobs_df["job_id"] == job_id]
+                    if not row.empty:
+                        params = row.iloc[0].to_dict()
+                params_str = ""
+                if params:
+                    params_str = "(" + ", ".join([f"{k}={v}" for k, v in params.items()]) + ")"
+                job_df = df[df["job_id"] == job_id].drop(columns="job_id")
+                job_df = job_df.rename(
+                    columns={
+                        col: f"{col} {params_str}" for col in job_df.columns if col != "time"
+                    }
+                )
+                export_df = pd.merge(export_df, job_df, on="time", how="outer")
+            suffix = "wide"
+
+        export_dir = workspace_path / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_path = export_dir / f"visualizer_export_{suffix}.csv"
+        export_df.to_csv(export_path, index=False)
+        rel_path = export_path.relative_to(workspace_path)
+        return {"download_url": f"/api/v1/tasks/{task_id}/files/download?path={rel_path.as_posix()}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to export data: {str(e)}")
 
 @router.get("/tasks/{task_id}/result_summary")
 def get_result_summary(

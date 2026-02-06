@@ -74,7 +74,7 @@ class TaskQueue:
 
             try:
                 # 1. Prepare Workspace
-                is_analysis = (task.type == "analysis")
+                is_analysis = (task.type.upper() == "ANALYSIS")
                 workspace_path = FileManager.create_workspace(task_id, task.project_id, is_analysis=is_analysis)
                 
                 # Determine Config Content

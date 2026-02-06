@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
@@ -13,6 +14,56 @@ class HDF5ReaderService:
         # root_dir is optional now as we prefer explicit workspace_path in query
         self.root_dir = list(Path(root_dir).glob("*")) if root_dir else None
 
+    def resolve_hdf5_file(self, task_id: str, workspace_path: Path) -> Optional[Path]:
+        """Resolve an HDF5 results file for a task workspace."""
+        hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
+        if not hdf5_file or not hdf5_file.exists():
+            hdf5_file = self._find_any_hdf5(workspace_path)
+        if not hdf5_file or not hdf5_file.exists():
+            logger.warning(f"No HDF5 file found for task {task_id} in {workspace_path}")
+            return None
+        return hdf5_file
+
+    def get_jobs_df(self, task_id: str, workspace_path: Path) -> pd.DataFrame:
+        """Load jobs table as DataFrame."""
+        hdf5_file = self.resolve_hdf5_file(task_id, workspace_path)
+        if not hdf5_file:
+            return pd.DataFrame()
+        try:
+            jobs_df = pd.read_hdf(hdf5_file, "jobs")
+            return jobs_df
+        except Exception as e:
+            logger.error(f"Error reading jobs table for task {task_id}: {str(e)}")
+            return pd.DataFrame()
+
+    def get_config_log(self, task_id: str, workspace_path: Path) -> Dict[str, Any]:
+        """Load config and log data from HDF5."""
+        hdf5_file = self.resolve_hdf5_file(task_id, workspace_path)
+        if not hdf5_file:
+            return {"config_data": None, "log_data": None}
+
+        config_data = None
+        log_data = None
+        try:
+            with pd.HDFStore(hdf5_file, mode="r") as store:
+                if "/config" in store.keys():
+                    try:
+                        config_raw = store.select("config").iloc[0, 0]
+                        config_data = json.loads(config_raw) if isinstance(config_raw, str) else config_raw
+                    except Exception:
+                        config_data = None
+
+                if "/log" in store.keys():
+                    try:
+                        log_raw = store.select("log").iloc[0, 0]
+                        log_data = json.loads(log_raw) if isinstance(log_raw, str) else log_raw
+                    except Exception:
+                        log_data = None
+        except Exception as e:
+            logger.error(f"Error reading config/log for task {task_id}: {str(e)}")
+
+        return {"config_data": config_data, "log_data": log_data}
+
     def _find_result_file(self, workspace_path: Path, filename: str) -> Path:
         """Finds a file recursively in the workspace, preferring the most deeply nested or latest one."""
         # User specified pattern: workspace / {timestamp} / results / filename
@@ -26,6 +77,102 @@ class HDF5ReaderService:
         matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return matches[0]
 
+    def _find_any_hdf5(self, workspace_path: Path) -> Optional[Path]:
+        """Finds the newest .h5 file in the workspace as a fallback."""
+        matches = list(workspace_path.glob("**/*.h5"))
+        if not matches:
+            return None
+        matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return matches[0]
+
+    def get_visualizer_metadata(self, task_id: str, workspace_path: Path) -> Dict[str, Any]:
+        """
+        Loads visualizer metadata from HDF5: variables, parameters, jobs table, config, log.
+        Returns a dict with keys: variable_options, parameter_options, table_columns, jobs_data, config_data, log_data.
+        """
+        try:
+            hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
+            if not hdf5_file or not hdf5_file.exists():
+                hdf5_file = self._find_any_hdf5(workspace_path)
+
+            if not hdf5_file or not hdf5_file.exists():
+                return {
+                    "variable_options": [],
+                    "parameter_options": [],
+                    "table_columns": [],
+                    "jobs_data": [],
+                    "config_data": None,
+                    "log_data": None,
+                }
+
+            # Defaults
+            variable_options: List[str] = []
+            parameter_options: List[str] = []
+            table_columns: List[Dict[str, Any]] = []
+            jobs_data: List[Dict[str, Any]] = []
+            config_data: Any = None
+            log_data: Any = None
+
+            # Load jobs & results columns
+            with pd.HDFStore(hdf5_file, mode="r") as store:
+                # Results columns
+                if "/results" in store.keys():
+                    try:
+                        results_cols = store.select("results", start=0, stop=0).columns
+                        variable_options = [c for c in results_cols if c not in ["time", "job_id"]]
+                    except Exception:
+                        variable_options = []
+
+                # Config
+                if "/config" in store.keys():
+                    try:
+                        config_raw = store.select("config").iloc[0, 0]
+                        config_data = json.loads(config_raw) if isinstance(config_raw, str) else config_raw
+                    except Exception:
+                        config_data = None
+
+                # Log
+                if "/log" in store.keys():
+                    try:
+                        log_raw = store.select("log").iloc[0, 0]
+                        log_data = json.loads(log_raw) if isinstance(log_raw, str) else log_raw
+                    except Exception:
+                        log_data = None
+
+            # Load jobs separately (may be large)
+            try:
+                jobs_df = pd.read_hdf(hdf5_file, "jobs")
+                if "job_id" in jobs_df.columns:
+                    cols = ["job_id"] + [c for c in jobs_df.columns if c != "job_id"]
+                    jobs_df = jobs_df[cols]
+
+                parameter_options = [c for c in jobs_df.columns if c != "job_id"]
+                table_columns = [{"name": c, "id": c} for c in jobs_df.columns]
+                jobs_data = jobs_df.to_dict("records")
+            except Exception:
+                parameter_options = []
+                table_columns = []
+                jobs_data = []
+
+            return {
+                "variable_options": variable_options,
+                "parameter_options": parameter_options,
+                "table_columns": table_columns,
+                "jobs_data": jobs_data,
+                "config_data": config_data,
+                "log_data": log_data,
+            }
+        except Exception as e:
+            logger.error(f"Error loading visualizer metadata for task {task_id}: {str(e)}")
+            return {
+                "variable_options": [],
+                "parameter_options": [],
+                "table_columns": [],
+                "jobs_data": [],
+                "config_data": None,
+                "log_data": None,
+            }
+
     def query_results(
         self, 
         task_id: str, 
@@ -37,7 +184,7 @@ class HDF5ReaderService:
         limit: Optional[int] = 2000 # Default limit for visualization performance
     ) -> Dict[str, Any]:
         """
-        Query simulation results from HDF5 or CSV with optional LTTB downsampling.
+        Query simulation results from HDF5 with optional LTTB downsampling.
         """
         # Normalize job_ids
         target_jobs = []
@@ -52,15 +199,7 @@ class HDF5ReaderService:
             if hdf5_file and hdf5_file.exists():
                 raw_df = self._query_hdf5_df(hdf5_file, variables, time_range, target_jobs)
             else:
-                csv_sweep = self._find_result_file(workspace_path, "sweep_results.csv")
-                if csv_sweep and csv_sweep.exists():
-                    raw_df = pd.read_csv(csv_sweep)
-                else:
-                    csv_single = self._find_result_file(workspace_path, "simulation_result.csv")
-                    if csv_single and csv_single.exists():
-                        raw_df = pd.read_csv(csv_single)
-                    else:
-                        raise FileNotFoundError(f"No result files found for task {task_id}")
+                raise FileNotFoundError(f"No result files found for task {task_id}")
 
             # 2. Filter & Clean DataFrame (if from CSV)
             if "time" not in raw_df.columns:
@@ -138,57 +277,6 @@ class HDF5ReaderService:
             if '/results' not in store:
                 return pd.DataFrame()
             return store.select('results', where=where_str, columns=columns)
-
-    def _query_csv(
-        self, 
-        path: Path, 
-        variables: List[str], 
-        time_range: Tuple[float, float],
-        job_ids: List[int]
-    ) -> Dict[str, Any]:
-        """Fallback query for CSV files. Reads full file then filters (slower)."""
-        df = pd.read_csv(path)
-        
-        # Filter by time
-        if time_range:
-            start, end = time_range
-            if "time" in df.columns:
-                df = df[(df["time"] >= start) & (df["time"] <= end)]
-        
-        # Handling job_ids
-        if job_ids:
-             if "job_id" in df.columns:
-                 df = df[df["job_id"].isin(job_ids)]
-             else:
-                 # If job_id not in columns, ignore filter as discussed
-                 pass
-            
-        # Select variables with support for "wide" format (var&param=val)
-        if variables:
-            cols_to_keep = []
-            
-            # 1. Always keep context columns
-            for ctx in ["time", "job_id"]:
-                if ctx in df.columns:
-                    cols_to_keep.append(ctx)
-            
-            # 2. Find matching data columns
-            available_cols = df.columns
-            for var in variables:
-                for col in available_cols:
-                    if col == var:
-                        cols_to_keep.append(col)
-                    elif col.startswith(f"{var}&"):
-                        # Matches "sds.I[1]&param=val"
-                        cols_to_keep.append(col)
-                        
-            # Remove duplicates and filter
-            cols_to_keep = list(set(cols_to_keep))
-            
-            if cols_to_keep:
-                df = df[cols_to_keep]
-            
-        return df.to_dict(orient='list')
 
     def get_summary_metrics(self, task_id: str, workspace_path: Path) -> List[Dict[str, Any]]:
         """

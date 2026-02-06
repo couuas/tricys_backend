@@ -1,7 +1,7 @@
 import uuid
 import re
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from sqlmodel import Field, SQLModel, Relationship
 from sqlalchemy import Column, JSON
 from pydantic import BaseModel, field_validator, model_validator
@@ -52,12 +52,15 @@ class ConfigJsonSchema(BaseModel):
     paths: Optional[PathsConfig] = None
     simulation: Optional[SimulationConfig] = None
     # Support direct dictionary for parameters as per user standard
-    simulation_parameters: Optional[Dict[str, List[Any]]] = None
+    simulation_parameters: Optional[Dict[str, Union[List[Any], Any]]] = None
     model_name: Optional[str] = None
     
     # [NEW] Enhanced validation fields
     active_alerts: Optional[List[Dict[str, Any]]] = None
     metrics_definition: Optional[Dict[str, Any]] = None
+    sensitivity_analysis: Optional[Dict[str, Any]] = None
+    analysis: Optional[Dict[str, Any]] = None  # For generic analysis specs
+    optimization: Optional[Dict[str, Any]] = None # For optimization specs
     
     @field_validator('model_name')
     @classmethod
@@ -69,15 +72,17 @@ class ConfigJsonSchema(BaseModel):
 
     @field_validator('simulation_parameters')
     @classmethod
-    def validate_sweep(cls, v: Optional[Dict[str, List[Any]]]) -> Optional[Dict[str, List[Any]]]:
+    def validate_sweep(cls, v: Optional[Dict[str, Union[List[Any], Any]]]) -> Optional[Dict[str, Union[List[Any], Any]]]:
         """Validate parameter sweep combinations."""
         if v:
             total_combinations = 1
             for param_name, values in v.items():
                 if not isinstance(values, list):
-                    raise ValueError(f"Parameter {param_name} values must be a list")
+                    # Scalar value = 1 combination
+                    continue
+                
                 if len(values) > 1000:
-                    raise ValueError(f"Parameter {param_name} has too many values (max 1000)")
+                    raise ValueError(f"Parameter {param_name} values must be a list")
                 total_combinations *= len(values)
             
             if total_combinations > 10000:
