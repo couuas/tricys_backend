@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from tricys_backend.core.config import settings
 from tricys_backend.api.v1.api import api_router
+from tricys_backend.api.v2.api import api_v2_router
 from tricys_backend.utils.db import create_db_and_tables
 from tricys_backend.services.task_queue import TaskQueue
 
@@ -152,6 +153,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+app.include_router(api_v2_router, prefix="/api/v2")
 
 # Mount static assets
 assets_dir = settings.BASE_DIR / "assets"
