@@ -3,13 +3,14 @@ from fastapi.responses import FileResponse
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 import os
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from tricys_backend.services.project_service import ProjectService 
 from tricys_backend.services.file_manager import FileManager
 from tricys_backend.utils.db import get_session
 from tricys_backend.models.project import Project
 from tricys_backend.models.user import User
+from tricys_backend.models.goview_project import GoviewProject
 from tricys_backend.api.deps import get_current_user
 
 router = APIRouter()
@@ -155,6 +156,7 @@ def create_demo_project(
         session.add(project)
         session.commit()
         session.refresh(project)
+        ProjectService.sync_goview_name(session, project.id, project.name, current_user.id)
 
         return {
             "project_id": project.id,
@@ -210,6 +212,47 @@ def get_project_details(
         "visual_config": project.visual_config or {}
     }
 
+@router.get("/consistency")
+def check_project_consistency(
+    fix: bool = Query(False),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    projects = ProjectService.list_projects(session, current_user.id, 0, 100000)
+    project_ids = {p.id for p in projects}
+
+    goview_projects = session.exec(
+        select(GoviewProject).where(GoviewProject.create_user_id == current_user.id)
+    ).all()
+    goview_ids = {p.id for p in goview_projects}
+
+    missing_goview = sorted(list(project_ids - goview_ids))
+    orphan_goview = sorted(list(goview_ids - project_ids))
+
+    fixed = []
+    if fix and missing_goview:
+        id_to_project = {p.id: p for p in projects}
+        for pid in missing_goview:
+            project = id_to_project.get(pid)
+            if not project:
+                continue
+            ProjectService.ensure_goview_project(
+                session,
+                project_id=pid,
+                project_name=project.name,
+                user_id=current_user.id,
+                commit=True
+            )
+            fixed.append(pid)
+
+    return {
+        "status": "success",
+        "missing_goview": missing_goview,
+        "orphan_goview": orphan_goview,
+        "fixed": fixed
+    }
+
+
 @router.delete("/{project_id}")
 def delete_project(
     project_id: str,
@@ -220,6 +263,35 @@ def delete_project(
     get_user_project(session, project_id, current_user.id)
     ProjectService.delete_project(session, project_id)
     return {"status": "success", "message": "Project deleted"}
+
+@router.patch("/{project_id}")
+def update_project(
+    project_id: str,
+    payload: Dict[str, Any] = Body(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id)
+    name = payload.get("name")
+    if name is None:
+        raise HTTPException(status_code=400, detail="name is required")
+    name = str(name).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name cannot be empty")
+    if len(name) > 200:
+        raise HTTPException(status_code=400, detail="name too long")
+
+    project.name = name
+    project.updated_at = datetime.now(timezone.utc)
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    ProjectService.sync_goview_name(session, project.id, project.name, current_user.id)
+    return {
+        "id": project.id,
+        "name": project.name,
+        "updated_at": project.updated_at
+    }
 
 @router.get("/{project_id}/structure")
 def get_structure(

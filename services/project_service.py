@@ -13,12 +13,116 @@ from fastapi import HTTPException
 
 from tricys_backend.models.project import Project
 from tricys_backend.models.task import Task
+from tricys_backend.models.goview_project import GoviewProject
 from tricys_backend.services.layout_service import LayoutService   
 from tricys_backend.services.file_manager import FileManager       
 
 logger = logging.getLogger(__name__)
 
 class ProjectService:
+
+    @staticmethod
+    def ensure_goview_project(
+        session: Session,
+        project_id: str,
+        project_name: str,
+        user_id: Optional[str],
+        commit: bool = True
+    ) -> None:
+        if not user_id:
+            return
+        try:
+            existing = session.get(GoviewProject, project_id)
+            if existing:
+                return
+
+            safe_name = project_name or f"Tricys-{str(project_id)[:8]}"
+            goview_project = GoviewProject(
+                id=project_id,
+                project_name=safe_name,
+                content="{}",
+                state=-1,
+                index_image="",
+                remarks=f"Tricys project: {project_id}",
+                create_user_id=user_id,
+            )
+            session.add(goview_project)
+            if commit:
+                session.commit()
+        except Exception as e:
+            logger.warning(f"Goview sync failed for project {project_id}: {e}")
+
+    @staticmethod
+    def sync_goview_name(
+        session: Session,
+        project_id: str,
+        project_name: str,
+        user_id: Optional[str]
+    ) -> None:
+        if not user_id:
+            return
+        try:
+            goview_project = session.get(GoviewProject, project_id)
+            if not goview_project:
+                ProjectService.ensure_goview_project(
+                    session,
+                    project_id=project_id,
+                    project_name=project_name,
+                    user_id=user_id,
+                    commit=True
+                )
+                return
+
+            if goview_project.create_user_id != user_id:
+                return
+
+            goview_project.project_name = project_name
+            goview_project.update_time = datetime.now(timezone.utc)
+            session.add(goview_project)
+            session.commit()
+        except Exception as e:
+            logger.warning(f"Goview rename sync failed for project {project_id}: {e}")
+
+    @staticmethod
+    def sync_goview_payload(
+        session: Session,
+        project_id: str,
+        user_id: Optional[str],
+        payload: Optional[Dict[str, Any]]
+    ) -> None:
+        if not user_id or not payload:
+            return
+        try:
+            ProjectService.ensure_goview_project(
+                session,
+                project_id=project_id,
+                project_name=payload.get("project_name") or payload.get("projectName") or "",
+                user_id=user_id,
+                commit=False
+            )
+            goview_project = session.get(GoviewProject, project_id)
+            if not goview_project:
+                return
+
+            if goview_project.create_user_id != user_id:
+                return
+
+            if payload.get("project_name") or payload.get("projectName"):
+                goview_project.project_name = payload.get("project_name") or payload.get("projectName")
+            if "content" in payload:
+                goview_project.content = payload.get("content") or "{}"
+            if "state" in payload and payload.get("state") is not None:
+                goview_project.state = int(payload.get("state"))
+            if "index_image" in payload or "indexImage" in payload:
+                goview_project.index_image = payload.get("index_image") or payload.get("indexImage") or ""
+            if "remarks" in payload:
+                goview_project.remarks = payload.get("remarks") or ""
+
+            goview_project.update_time = datetime.now(timezone.utc)
+            session.add(goview_project)
+            session.commit()
+        except Exception as e:
+            logger.warning(f"Goview payload sync failed for project {project_id}: {e}")
 
     @staticmethod
     def create_project(
@@ -60,6 +164,13 @@ class ProjectService:
             )
 
             session.add(project)
+            ProjectService.ensure_goview_project(
+                session,
+                project_id=project_id,
+                project_name=project.name,
+                user_id=user_id,
+                commit=False
+            )
             session.commit()
             session.refresh(project)
 
@@ -154,6 +265,12 @@ class ProjectService:
         except Exception as e:
             logger.error(f"Failed to delete project files for {project_id}: {e}")
 
+        goview_project = session.get(GoviewProject, project_id)
+        if goview_project:
+            goview_project.is_delete = 1
+            goview_project.update_time = datetime.now(timezone.utc)
+            session.add(goview_project)
+
         session.delete(project)
         session.commit()
 
@@ -244,6 +361,17 @@ class ProjectService:
                 "tasks": tasks_data,
                 "component_layouts": project.component_layouts # [NEW] Persist component dashboards
             }
+
+            goview_project = session.get(GoviewProject, project.id)
+            if goview_project:
+                metadata["goview"] = {
+                    "project_name": goview_project.project_name,
+                    "content": goview_project.content,
+                    "state": goview_project.state,
+                    "index_image": goview_project.index_image,
+                    "remarks": goview_project.remarks,
+                    "is_delete": goview_project.is_delete
+                }
             
             with open(gather_path / "project_metadata.json", "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4)
@@ -349,6 +477,23 @@ class ProjectService:
             session.add(project)
             session.commit() # Commit project first to ensure foreign key validity
             session.refresh(project)
+
+            ProjectService.ensure_goview_project(
+                session,
+                project_id=new_project_id,
+                project_name=project.name,
+                user_id=user_id,
+                commit=True
+            )
+
+            goview_payload = metadata.get("goview") if isinstance(metadata.get("goview"), dict) else None
+            if goview_payload:
+                ProjectService.sync_goview_payload(
+                    session,
+                    project_id=new_project_id,
+                    user_id=user_id,
+                    payload=goview_payload
+                )
             
             # --- RESTORE TASKS ---
             restored_tasks_data = metadata.get("tasks", [])
@@ -453,4 +598,12 @@ class ProjectService:
         session.add(forked)
         session.commit()
         session.refresh(forked)
+
+        ProjectService.ensure_goview_project(
+            session,
+            project_id=new_project_id,
+            project_name=forked.name,
+            user_id=user_id,
+            commit=True
+        )
         return forked

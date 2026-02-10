@@ -22,6 +22,7 @@ class Project(SQLModel, table=True):
     
     # --- Visibility ---
     is_public: bool = Field(default=False)
+    archived_owner_id: Optional[str] = Field(default=None)
     
     # --- Paths ---
     # Absolute path to the project directory: workspaces/{project_id}

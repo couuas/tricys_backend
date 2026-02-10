@@ -47,7 +47,7 @@ def _terminate_process(task_id: str):
         pass
     _HDF5_PROC_REGISTRY.pop(task_id, None)
 
-def get_task_workspace(task_id: str, session: Session, current_user: User) -> Path:    
+def get_task_workspace(task_id: str, session: Session, current_user: User, allow_public: bool = False) -> Path:    
     """Helper to get and validate task workspace path with ownership check."""
     task = session.get(Task, task_id)
     if not task:
@@ -55,7 +55,9 @@ def get_task_workspace(task_id: str, session: Session, current_user: User) -> Pa
 
     # Verify ownership via Project
     project = session.get(Project, task.project_id)
-    if not project or project.user_id != current_user.id:
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id != current_user.id and not (allow_public and project.is_public):
         raise HTTPException(status_code=403, detail="Not authorized to access this task")
 
     if not task.workspace_path:
@@ -76,7 +78,7 @@ def list_task_files(
     current_user: User = Depends(get_current_user)
 ):
     """List all files in the task workspace."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         return file_browser.list_files(workspace_path)
     except FileNotFoundError:
@@ -92,7 +94,7 @@ def download_task_file(
     current_user: User = Depends(get_current_user)
 ):
     """Download or stream a specific file from the workspace."""   
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         full_path = file_browser.get_file_path(workspace_path, path)
         filename = full_path.name
@@ -113,7 +115,7 @@ def get_task_file_content(
     current_user: User = Depends(get_current_user)
 ):
     """Return text content for preview with size limit."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         full_path = file_browser.get_file_path(workspace_path, path)
         with open(full_path, "rb") as f:
@@ -142,7 +144,7 @@ def download_task_archive(
     current_user: User = Depends(get_current_user)
 ):
     """Download a zip archive of the task workspace."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         zip_path = archive_service.create_task_archive(task_id, workspace_path)
         return FileResponse(
@@ -162,7 +164,7 @@ def get_visualizer_metadata(
     current_user: User = Depends(get_current_user)
 ):
     """Get HDF5 visualizer metadata (variables, parameters, jobs table, config, logs)."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         return hdf5_service.get_visualizer_metadata(task_id, workspace_path)
     except Exception as e:
@@ -180,7 +182,7 @@ def get_visualizer_jobs(
     current_user: User = Depends(get_current_user),
 ):
     """Get paginated jobs table for visualizer with optional filter/sort."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         jobs_df = hdf5_service.get_jobs_df(task_id, workspace_path)
         if jobs_df.empty:
@@ -222,7 +224,7 @@ def get_visualizer_series(
     current_user: User = Depends(get_current_user),
 ):
     """Get time series data for selected job_ids and variables."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         parsed_job_ids = [int(j) for j in job_ids.split(",") if j.strip()] if job_ids else []
         parsed_vars = [v for v in vars.split(",") if v.strip()] if vars else []
@@ -252,7 +254,7 @@ def get_visualizer_metrics(
     current_user: User = Depends(get_current_user),
 ):
     """Get summary metrics for selected job_ids from /summary."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
         if not metrics:
@@ -274,7 +276,7 @@ def get_visualizer_config(
     current_user: User = Depends(get_current_user),
 ):
     """Get config data from HDF5."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         data = hdf5_service.get_config_log(task_id, workspace_path)
         return {"config": data.get("config_data")}
@@ -289,7 +291,7 @@ def get_visualizer_log(
     current_user: User = Depends(get_current_user),
 ):
     """Get log data from HDF5."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         data = hdf5_service.get_config_log(task_id, workspace_path)
         return {"log": data.get("log_data")}
@@ -305,7 +307,7 @@ def open_hdf5_visualizer(
     current_user: User = Depends(get_current_user),
 ):
     """Launch `tricys hdf5 <file>` and track the process to avoid lingering instances."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     file_path = payload.get("path")
     if not file_path:
         raise HTTPException(status_code=400, detail="Missing file path")
@@ -353,7 +355,7 @@ def get_hdf5_status(
     current_user: User = Depends(get_current_user),
 ):
     """Check status of running hdf5 visualizer process."""
-    _ = get_task_workspace(task_id, session, current_user)
+    _ = get_task_workspace(task_id, session, current_user, allow_public=True)
     entry = _HDF5_PROC_REGISTRY.get(task_id)
     if not entry:
         return {"running": False}
@@ -466,7 +468,7 @@ def stop_hdf5_visualizer(
     current_user: User = Depends(get_current_user),
 ):
     """Stop running hdf5 visualizer process for a task."""
-    _ = get_task_workspace(task_id, session, current_user)
+    _ = get_task_workspace(task_id, session, current_user, allow_public=True)
     _terminate_process(task_id)
     return {"status": "stopped"}
 
@@ -549,7 +551,7 @@ def get_result_summary(
     current_user: User = Depends(get_current_user)
 ):
     """Get summary scalar metrics for the simulation task."""      
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
         return {"metrics": metrics}
@@ -564,7 +566,7 @@ def query_results(
     current_user: User = Depends(get_current_user)
 ):
     """Raw HDF5 query for internal frontend usage."""
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         return hdf5_service.query_results(
             task_id=task_id,
@@ -591,7 +593,7 @@ def query_results_bi(
     Grafana SimpleJSON compatible query endpoint.
     Body: {"targets": [{"target": "sds.I"}], "range": {"from": "...", "to": "..."}}
     """
-    workspace_path = get_task_workspace(task_id, session, current_user)
+    workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
         return hdf5_service.query_results_bi(task_id, workspace_path, request_data)
     except Exception as e:

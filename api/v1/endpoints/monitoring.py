@@ -54,17 +54,26 @@ def read_tasks(
     offset: int = 0,
     limit: int = Query(default=20, lte=100),
     status: str = None,
+    project_id: str = Query(default=None),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """Retrieve tasks belonging to the current user"""
-    # Join with Project to filter by user_id
-    query = select(Task).join(Project).where(Project.user_id == current_user.id)
+    """Retrieve tasks for the current user or a specific public project"""
+    if project_id:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.user_id != current_user.id and not project.is_public:
+            raise HTTPException(status_code=403, detail="Not authorized to access this project")
+        query = select(Task).where(Task.project_id == project_id)
+    else:
+        # Join with Project to filter by user_id
+        query = select(Task).join(Project).where(Project.user_id == current_user.id)
+
     query = query.offset(offset).limit(limit).order_by(Task.created_at.desc())
-    
     if status:
         query = query.where(Task.status == status)
-        
+
     tasks = session.exec(query).all()
     return tasks
 
@@ -110,14 +119,16 @@ def get_tasks_summary(
         logger.error(f"Error getting task summary: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve task summary")
 
-def get_user_task(session: Session, task_id: str, user_id: str) -> Task:
+def get_user_task(session: Session, task_id: str, user_id: str, allow_public: bool = False) -> Task:
     """Helper to get task and verify ownership"""
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
     project = session.get(Project, task.project_id)
-    if not project or project.user_id != user_id:
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id != user_id and not (allow_public and project.is_public):
         raise HTTPException(status_code=403, detail="Not authorized to access this task")
     return task
 
@@ -128,7 +139,7 @@ def read_task(
     current_user: User = Depends(get_current_user)
 ):
     """Retrieve a specific task"""
-    return get_user_task(session, task_id, current_user.id)
+    return get_user_task(session, task_id, current_user.id, allow_public=True)
 
 @router.post("/tasks/{task_id}/stop")
 def stop_task(
@@ -174,7 +185,7 @@ def get_task_logs(
     current_user: User = Depends(get_current_user)
 ):
     """Retrieve the simulation logs for a task."""
-    task = get_user_task(session, task_id, current_user.id)
+    task = get_user_task(session, task_id, current_user.id, allow_public=True)
         
     if not task.workspace_path:
         return {"logs": []}

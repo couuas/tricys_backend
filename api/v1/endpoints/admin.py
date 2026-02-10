@@ -6,12 +6,14 @@ from datetime import datetime
 from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Body, File, UploadFile
 from fastapi.responses import FileResponse
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 from pathlib import Path
 
 from tricys_backend.api.deps import get_session, get_current_active_superuser
 from tricys_backend.models.user import User
+from tricys_backend.models.user import User
 from tricys_backend.models.project import Project
+from tricys_backend.models.goview_project import GoviewProject
 from tricys_backend.core.config import settings
 from tricys_backend.services.file_manager import FileManager
 
@@ -99,8 +101,9 @@ def delete_user(
 @router.get("/system/stats")
 def get_system_stats(
     current_user: User = Depends(get_current_active_superuser),
+    session: Session = Depends(get_session)
 ):
-    """Get system stats (CPU, RAM, Disk)."""
+    """Get system stats (CPU, RAM, Disk, Users, Projects)."""
     cpu_percent = psutil.cpu_percent(interval=None)
     memory = psutil.virtual_memory()
     
@@ -109,11 +112,24 @@ def get_system_stats(
     disk = psutil.disk_usage(str(disk_path))
     
     # Process Count (Tricys related)
-    # Simple count for now
     process_count = 0
     for proc in psutil.process_iter(['name']):
-        if 'python' in proc.info['name']: # Very rough approximation
+        if 'python' in proc.info['name']: 
              process_count += 1
+
+    # Database Stats
+    # Users
+    user_total = session.exec(select(func.count(User.id))).one()
+    user_admin = session.exec(select(func.count(User.id)).where(User.is_superuser == True)).one()
+    user_active = session.exec(select(func.count(User.id)).where(User.is_active == True)).one()
+
+    # Projects (Tricys)
+    proj_total = session.exec(select(func.count(Project.id))).one()
+    proj_public = session.exec(select(func.count(Project.id)).where(Project.is_public == True)).one()
+
+    # GoView
+    goview_total = session.exec(select(func.count(GoviewProject.id)).where(GoviewProject.is_delete == 0)).one()
+    goview_published = session.exec(select(func.count(GoviewProject.id)).where(GoviewProject.is_delete == 0, GoviewProject.state == 1)).one()
 
     return {
         "cpu": cpu_percent,
@@ -127,7 +143,25 @@ def get_system_stats(
             "free": disk.free,
             "percent": disk.percent
         },
-        "processes": process_count
+        "processes": process_count,
+        "stats": {
+            "users": {
+                "total": user_total,
+                "admin": user_admin,
+                "operator": user_total - user_admin,
+                "active": user_active
+            },
+            "projects": {
+                "total": proj_total,
+                "public": proj_public,
+                "private": proj_total - proj_public
+            },
+            "goview": {
+                "total": goview_total,
+                "published": goview_published,
+                "draft": goview_total - goview_published
+            }
+        }
     }
 
 # --- D. Global Project Management ---
@@ -149,14 +183,17 @@ def publish_project(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_superuser),
 ):
-    """Make a project public."""
+    """Archive a project and make it public."""
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id and not project.archived_owner_id:
+        project.archived_owner_id = project.user_id
+    project.user_id = None
     project.is_public = True
     session.add(project)
     session.commit()
-    return {"status": "success", "is_public": True}
+    return {"status": "success", "is_public": True, "archived": True}
 
 @router.patch("/projects/{project_id}/unpublish")
 def unpublish_project(
@@ -164,14 +201,17 @@ def unpublish_project(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_superuser),
 ):
-    """Make a project private."""
+    """Restore a project to private (owned) state."""
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.archived_owner_id and not project.user_id:
+        project.user_id = project.archived_owner_id
+        project.archived_owner_id = None
     project.is_public = False
     session.add(project)
     session.commit()
-    return {"status": "success", "is_public": False}
+    return {"status": "success", "is_public": False, "archived": False}
 
 @router.delete("/projects/{project_id}")
 def delete_project_admin(
@@ -290,3 +330,53 @@ def download_system_logs(
         media_type="text/plain",
         filename=f"backend_log_{int(datetime.now().timestamp())}.txt"
     )
+
+# --- F. GoView Management ---
+
+@router.get("/goview/projects", response_model=List[GoviewProject])
+def read_all_goview_projects(
+    skip: int = 0,
+    limit: int = 100,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_superuser),
+):
+    """Get all GoView projects."""
+    projects = session.exec(select(GoviewProject).offset(skip).limit(limit).order_by(GoviewProject.update_time.desc())).all()
+    return projects
+
+@router.delete("/goview/projects/{project_id}")
+def delete_goview_project_admin(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_superuser),
+):
+    """Soft delete a GoView project."""
+    project = session.get(GoviewProject, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    project.is_delete = 1
+    project.update_time = datetime.now(timezone.utc)
+    session.add(project)
+    session.commit()
+    return {"status": "success", "message": "Project deleted"}
+
+from datetime import timezone
+
+@router.patch("/goview/projects/{project_id}/publish")
+def toggle_goview_publish(
+    project_id: str,
+    state: int = Body(..., embed=True),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_superuser),
+):
+    """Toggle publish state of a GoView project (1=Published, -1=Draft)."""
+    project = session.get(GoviewProject, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    project.state = state
+    project.update_time = datetime.now(timezone.utc)
+    session.add(project)
+    session.commit()
+    return {"status": "success", "state": state}

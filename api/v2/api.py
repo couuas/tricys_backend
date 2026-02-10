@@ -1,8 +1,10 @@
 from fastapi import APIRouter
-from tricys_backend.api.v2.endpoints import goview
+from tricys_backend.api.v2.endpoints import goview_extensions
+from tricys_backend.api.v2 import goview
 
 api_v2_router = APIRouter()
 api_v2_router.include_router(goview.router, prefix="/goview", tags=["GoView"])
+api_v2_router.include_router(goview_extensions.router, prefix="/goview", tags=["GoView Extensions"])
 
 @api_v2_router.get("/health")
 def health_check():

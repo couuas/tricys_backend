@@ -115,9 +115,17 @@ app = FastAPI(
 )
 
 # Exception Handlers
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, HTTPException
+from fastapi.exception_handlers import http_exception_handler
+from tricys_backend.api.v2.goview.responses import error as goview_error
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler_wrapper(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/v2/goview") and str(exc.detail) == "token overdue":
+        return JSONResponse(status_code=200, content=goview_error(886, "token overdue"))
+    return await http_exception_handler(request, exc)
 
 # Configure Logging
 import logging
@@ -159,6 +167,11 @@ app.include_router(api_v2_router, prefix="/api/v2")
 assets_dir = settings.BASE_DIR / "assets"
 assets_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=assets_dir), name="static")
+
+# Mount GoView assets under /assets/goview to match plan
+goview_assets_dir = assets_dir / "goview"
+goview_assets_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/assets/goview", StaticFiles(directory=goview_assets_dir), name="goview-assets")
 
 # Mount workspaces for serving custom model files
 workspaces_dir = settings.WORKSPACES_DIR
