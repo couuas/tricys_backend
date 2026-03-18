@@ -194,23 +194,7 @@ def fork_project(
         
     return ProjectService.fork_project(session, project_id, current_user.id)
 
-@router.get("/{project_id}", response_model=Dict[str, Any])
-def get_project_details(
-    project_id: str, 
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
-):
-    project = get_user_project(session, project_id, current_user.id, allow_public=True)
-    return {
-        "id": project.id,
-        "name": project.name,
-        "user_id": project.user_id,
-        "created_at": project.created_at,
-        "file_path": project.model_file_path,
-        "structure": project.structure_json,
-        "current_parameters": project.parameters_json,
-        "visual_config": project.visual_config or {}
-    }
+
 
 @router.get("/consistency")
 def check_project_consistency(
@@ -252,6 +236,39 @@ def check_project_consistency(
         "fixed": fixed
     }
 
+@router.post("/{project_id}/fork", response_model=Project)
+def fork_project(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Clone a public project or own project."""
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    if project.user_id != current_user.id and not project.is_public:
+        raise HTTPException(status_code=403, detail="Not authorized to fork this project")
+        
+    return ProjectService.fork_project(session, project_id, current_user.id)
+
+@router.get("/{project_id}", response_model=Dict[str, Any])
+def get_project_details(
+    project_id: str, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    return {
+        "id": project.id,
+        "name": project.name,
+        "user_id": project.user_id,
+        "created_at": project.created_at,
+        "file_path": project.model_file_path,
+        "structure": project.structure_json,
+        "current_parameters": project.parameters_json,
+        "visual_config": project.visual_config or {}
+    }
 
 @router.delete("/{project_id}")
 def delete_project(

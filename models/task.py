@@ -75,15 +75,44 @@ class ConfigJsonSchema(BaseModel):
     def validate_sweep(cls, v: Optional[Dict[str, Union[List[Any], Any]]]) -> Optional[Dict[str, Union[List[Any], Any]]]:
         """Validate parameter sweep combinations."""
         if v:
+            def estimate_length(val: Any) -> int:
+                if isinstance(val, list):
+                    return len(val)
+                if isinstance(val, str):
+                    s = val.strip()
+                    if s.startswith("{") and s.endswith("}"):
+                        try:
+                            import ast
+                            parsed_values = ast.literal_eval(f"[{s[1:-1]}]")
+                            if isinstance(parsed_values, list):
+                                acc = 1
+                                for p in parsed_values:
+                                    acc *= estimate_length(p)
+                                return acc
+                        except Exception:
+                            pass
+                    
+                    if ":" in s:
+                        parts = s.split(":")
+                        prefix = parts[0].lower()
+                        try:
+                            if prefix in ("linspace", "log", "rand"):
+                                if len(parts) >= 4:
+                                    return int(parts[3])
+                            elif len(parts) == 3 and prefix != "file":
+                                start, stop, step = map(float, parts)
+                                if step != 0:
+                                    return max(1, int(abs(stop - start) / abs(step)) + 1)
+                        except Exception:
+                            pass
+                return 1
+
             total_combinations = 1
             for param_name, values in v.items():
-                if not isinstance(values, list):
-                    # Scalar value = 1 combination
-                    continue
-                
-                if len(values) > 1000:
-                    raise ValueError(f"Parameter {param_name} values must be a list")
-                total_combinations *= len(values)
+                length = estimate_length(values)
+                if length > 1000:
+                    raise ValueError(f"Parameter {param_name} evaluates to excessively large sweep list (>1000 items).")
+                total_combinations *= length
             
             if total_combinations > 10000:
                 raise ValueError(f"Total parameter combinations ({total_combinations}) exceeds limit (10000)")
