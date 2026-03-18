@@ -267,7 +267,8 @@ def get_project_details(
         "file_path": project.model_file_path,
         "structure": project.structure_json,
         "current_parameters": project.parameters_json,
-        "visual_config": project.visual_config or {}
+        "visual_config": project.visual_config or {},
+        "simulation_config": project.simulation_config or {}
     }
 
 @router.delete("/{project_id}")

@@ -46,6 +46,31 @@ class SimulationConfig(BaseModel):
         if v and not re.match(r'^[a-zA-Z0-9_.\-]+$', v):
             raise ValueError(f"model_name contains invalid characters: {v}")
         return v
+
+class FilterRuleConfig(BaseModel):
+    """Configuration for result-based output filtering."""
+    columns: List[str]
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+    class Config:
+        extra = 'forbid'
+
+    @field_validator('columns')
+    @classmethod
+    def validate_columns(cls, v: List[str]) -> List[str]:
+        if not v:
+            raise ValueError('filter rule must include at least one column')
+        cleaned = [str(column).strip() for column in v if str(column).strip()]
+        if not cleaned:
+            raise ValueError('filter rule must include at least one valid column')
+        return cleaned
+
+    @model_validator(mode='after')
+    def validate_bounds(self):
+        if self.min is None and self.max is None:
+            raise ValueError('filter rule must define min or max')
+        return self
     
 class ConfigJsonSchema(BaseModel):
     """Schema for validating config_json structure."""
@@ -58,6 +83,7 @@ class ConfigJsonSchema(BaseModel):
     # [NEW] Enhanced validation fields
     active_alerts: Optional[List[Dict[str, Any]]] = None
     metrics_definition: Optional[Dict[str, Any]] = None
+    filter_schema: Optional[List[FilterRuleConfig]] = None
     sensitivity_analysis: Optional[Dict[str, Any]] = None
     analysis: Optional[Dict[str, Any]] = None  # For generic analysis specs
     optimization: Optional[Dict[str, Any]] = None # For optimization specs
