@@ -8,7 +8,10 @@ class Settings(BaseSettings):
     
     # Path Configuration
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
-    WORKSPACES_DIR: Path = BASE_DIR / "workspaces"
+    WORKSPACES_DIR: Path = Path(
+        os.getenv("WORKSPACES_DIR", str(BASE_DIR / "workspaces"))
+    )
+    ASSETS_DIR: Path = Path(os.getenv("ASSETS_DIR", str(BASE_DIR / "assets")))
     
     # Database
     # Supports SQLite by default, but can be overridden by env var for PostgreSQL
@@ -19,6 +22,19 @@ class Settings(BaseSettings):
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    HDF5_VISUALIZER_SECRET: str = os.getenv(
+        "HDF5_VISUALIZER_SECRET", os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production")
+    )
+    HDF5_VISUALIZER_BASE_URL: str = os.getenv("HDF5_VISUALIZER_BASE_URL", "/hdf5/")
+    HDF5_VISUALIZER_TOKEN_TTL_SECONDS: int = int(
+        os.getenv("HDF5_VISUALIZER_TOKEN_TTL_SECONDS", "900")
+    )
+    HDF5_CONTEXTS_DIR: Path = Path(
+        os.getenv("HDF5_CONTEXTS_DIR", str(BASE_DIR / "hdf5_contexts"))
+    )
+    HDF5_VISUALIZER_HEALTHCHECK_URL: str = os.getenv(
+        "HDF5_VISUALIZER_HEALTHCHECK_URL", ""
+    )
     
     TRICYS_CMD: str = "tricys"  # or "python -m tricys"
     
@@ -40,3 +56,5 @@ settings = Settings()
 
 # Ensure workspaces directory exists
 os.makedirs(settings.WORKSPACES_DIR, exist_ok=True)
+os.makedirs(settings.ASSETS_DIR, exist_ok=True)
+os.makedirs(settings.HDF5_CONTEXTS_DIR, exist_ok=True)

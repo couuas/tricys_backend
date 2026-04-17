@@ -7,7 +7,7 @@ __pycache__/
 .pytest_cache/
 
 # Virtual Environments
-.venv
+.venv/
 venv/
 env/
 
@@ -21,10 +21,11 @@ dist/
 .idea/
 .cache/
 
-**/workspaces/*
+# Runtime artifacts
+hdf5_contexts/
+workspaces/
+*.db
+*.log
 
-**/*.db
-
-**/*.log
-
+# Generated backend assets
 assets/

@@ -3,29 +3,32 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session
 from typing import Dict, Any, List, Optional
 from pathlib import Path
+from datetime import date, datetime
+from urllib.error import URLError
+from urllib.request import urlopen
+from urllib.parse import quote
 import json
+import math
 import pandas as pd
-import subprocess
-import threading
-import time
-import socket
-
-def find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        return s.getsockname()[1]
+import numpy as np
 
 from tricys_backend.utils.db import get_session
 from tricys_backend.models.task import Task
 from tricys_backend.models.project import Project
 from tricys_backend.models.user import User
 from tricys_backend.api.deps import get_current_user
+from tricys_backend.core.config import settings
 from tricys_backend.models.data_query import DataQueryRequest
 from tricys_backend.services.file_browser_service import FileBrowserService
 from tricys_backend.services.hdf5_service import HDF5ReaderService
 from tricys_backend.services.archive_service import ArchiveService
 from tricys_backend.services.ai_service import AIService
 from tricys.visualizer.filtering import filter_dataframe
+from tricys.visualizer.context import (
+    build_viewer_context,
+    create_context_reference,
+    issue_context_token,
+)
 
 router = APIRouter()
 
@@ -33,19 +36,79 @@ file_browser = FileBrowserService()
 hdf5_service = HDF5ReaderService()
 archive_service = ArchiveService()
 
-_HDF5_PROC_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
-def _terminate_process(task_id: str):
-    entry = _HDF5_PROC_REGISTRY.get(task_id)
-    if not entry:
-        return
-    proc = entry.get("process")
+def sanitize_json_payload(value: Any) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        return {key: sanitize_json_payload(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_json_payload(item) for item in value]
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, np.integer):
+        return int(value)
+
+    if isinstance(value, np.bool_):
+        return bool(value)
+
+    if isinstance(value, np.floating):
+        value = float(value)
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
     try:
-        if proc and proc.poll() is None:
-            proc.terminate()
-    except Exception:
+        if pd.isna(value):
+            return None
+    except TypeError:
         pass
-    _HDF5_PROC_REGISTRY.pop(task_id, None)
+
+    return value
+
+
+def resolve_requested_hdf5_file(
+    workspace_path: Path,
+    requested_path: Optional[str],
+) -> Optional[Path]:
+    if not requested_path:
+        return None
+
+    full_path = file_browser.get_file_path(workspace_path, requested_path)
+    if full_path.suffix.lower() != ".h5":
+        raise HTTPException(status_code=400, detail="Only .h5 files are supported")
+
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="HDF5 file not found")
+
+    return full_path
+
+
+def build_hdf5_service_url(token: str) -> str:
+    base_url = settings.HDF5_VISUALIZER_BASE_URL or "/hdf5/"
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}token={quote(token)}"
+
+
+def probe_hdf5_service() -> Dict[str, Any]:
+    healthcheck_url = settings.HDF5_VISUALIZER_HEALTHCHECK_URL
+    if not healthcheck_url:
+        return {"running": False, "detail": "HDF5 healthcheck URL not configured"}
+
+    try:
+        with urlopen(healthcheck_url, timeout=3) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return {
+                "running": 200 <= response.status < 300,
+                "status_code": response.status,
+                "detail": body[:200],
+            }
+    except URLError as exc:
+        return {"running": False, "detail": str(exc)}
 
 def get_task_workspace(task_id: str, session: Session, current_user: User, allow_public: bool = False) -> Path:    
     """Helper to get and validate task workspace path with ownership check."""
@@ -160,19 +223,25 @@ def download_task_archive(
 @router.get("/tasks/{task_id}/visualizer/metadata")
 def get_visualizer_metadata(
     task_id: str,
+    path: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
     """Get HDF5 visualizer metadata (variables, parameters, jobs table, config, logs)."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
-        return hdf5_service.get_visualizer_metadata(task_id, workspace_path)
+        selected_path = resolve_requested_hdf5_file(workspace_path, path)
+        payload = hdf5_service.get_visualizer_metadata(task_id, workspace_path, selected_path)
+        return sanitize_json_payload(payload)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load visualizer metadata: {str(e)}")
 
 @router.get("/tasks/{task_id}/visualizer/jobs")
 def get_visualizer_jobs(
     task_id: str,
+    path: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
     sort_by: Optional[str] = None,
@@ -184,7 +253,8 @@ def get_visualizer_jobs(
     """Get paginated jobs table for visualizer with optional filter/sort."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
-        jobs_df = hdf5_service.get_jobs_df(task_id, workspace_path)
+        selected_path = resolve_requested_hdf5_file(workspace_path, path)
+        jobs_df = hdf5_service.get_jobs_df(task_id, workspace_path, selected_path)
         if jobs_df.empty:
             return {"items": [], "page": page, "page_size": page_size, "total": 0}
 
@@ -209,7 +279,9 @@ def get_visualizer_jobs(
         end = start + page_size
         items = jobs_df.iloc[start:end].to_dict("records")
 
-        return {"items": items, "page": page, "page_size": page_size, "total": total}
+        return sanitize_json_payload({"items": items, "page": page, "page_size": page_size, "total": total})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load jobs: {str(e)}")
 
@@ -217,6 +289,7 @@ def get_visualizer_jobs(
 @router.get("/tasks/{task_id}/visualizer/series")
 def get_visualizer_series(
     task_id: str,
+    path: Optional[str] = None,
     job_ids: Optional[str] = None,
     vars: Optional[str] = None,
     limit: int = Query(2000, ge=1, le=200000),
@@ -226,6 +299,7 @@ def get_visualizer_series(
     """Get time series data for selected job_ids and variables."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
+        selected_path = resolve_requested_hdf5_file(workspace_path, path)
         parsed_job_ids = [int(j) for j in job_ids.split(",") if j.strip()] if job_ids else []
         parsed_vars = [v for v in vars.split(",") if v.strip()] if vars else []
 
@@ -235,13 +309,16 @@ def get_visualizer_series(
             variables=parsed_vars,
             job_ids=parsed_job_ids,
             limit=limit,
+            selected_path=selected_path,
         )
 
         if "time" not in data_dict:
             return {"records": []}
 
         df = pd.DataFrame(data_dict)
-        return {"records": df.to_dict("records")}
+        return sanitize_json_payload({"records": df.to_dict("records")})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load series: {str(e)}")
 
@@ -249,6 +326,7 @@ def get_visualizer_series(
 @router.get("/tasks/{task_id}/visualizer/metrics")
 def get_visualizer_metrics(
     task_id: str,
+    path: Optional[str] = None,
     job_ids: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -256,7 +334,8 @@ def get_visualizer_metrics(
     """Get summary metrics for selected job_ids from /summary."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
-        metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
+        selected_path = resolve_requested_hdf5_file(workspace_path, path)
+        metrics = hdf5_service.get_summary_metrics(task_id, workspace_path, selected_path)
         if not metrics:
             return {"records": []}
 
@@ -264,7 +343,9 @@ def get_visualizer_metrics(
             target_ids = {int(j) for j in job_ids.split(",") if j.strip()}
             metrics = [m for m in metrics if int(m.get("job_id", -1)) in target_ids]
 
-        return {"records": metrics}
+        return sanitize_json_payload({"records": metrics})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load metrics: {str(e)}")
 
@@ -272,14 +353,18 @@ def get_visualizer_metrics(
 @router.get("/tasks/{task_id}/visualizer/config")
 def get_visualizer_config(
     task_id: str,
+    path: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
     """Get config data from HDF5."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
-        data = hdf5_service.get_config_log(task_id, workspace_path)
-        return {"config": data.get("config_data")}
+        selected_path = resolve_requested_hdf5_file(workspace_path, path)
+        data = hdf5_service.get_config_log(task_id, workspace_path, selected_path)
+        return sanitize_json_payload({"config": data.get("config_data")})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load config: {str(e)}")
 
@@ -287,14 +372,18 @@ def get_visualizer_config(
 @router.get("/tasks/{task_id}/visualizer/log")
 def get_visualizer_log(
     task_id: str,
+    path: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
     """Get log data from HDF5."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     try:
-        data = hdf5_service.get_config_log(task_id, workspace_path)
-        return {"log": data.get("log_data")}
+        selected_path = resolve_requested_hdf5_file(workspace_path, path)
+        data = hdf5_service.get_config_log(task_id, workspace_path, selected_path)
+        return sanitize_json_payload({"log": data.get("log_data")})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load log: {str(e)}")
 
@@ -306,46 +395,48 @@ def open_hdf5_visualizer(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Launch `tricys hdf5 <file>` and track the process to avoid lingering instances."""
+    """Validate the selected HDF5 file and return a signed shared-viewer URL."""
     workspace_path = get_task_workspace(task_id, session, current_user, allow_public=True)
     file_path = payload.get("path")
     if not file_path:
         raise HTTPException(status_code=400, detail="Missing file path")
 
-    full_path = file_browser.get_file_path(workspace_path, file_path)
-    if full_path.suffix.lower() != ".h5":
-        raise HTTPException(status_code=400, detail="Only .h5 files are supported")
-
-    # Terminate any existing process for this task
-    _terminate_process(task_id)
-
-    try:
-        port = find_free_port()
-        proc = subprocess.Popen(
-            ["tricys", "hdf5", str(full_path), "--port", str(port)],
-            cwd=str(workspace_path),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-        )
-
-        # Auto-terminate after 10 minutes
-        timer = threading.Timer(600, lambda: _terminate_process(task_id))
-        timer.daemon = True
-        timer.start()
-
-        _HDF5_PROC_REGISTRY[task_id] = {
-            "process": proc,
-            "pid": proc.pid,
-            "port": port,
-            "file": str(full_path),
-            "started_at": time.time(),
-            "timer": timer,
-        }
-
-        return {"status": "started", "pid": proc.pid, "port": port}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start visualizer: {str(e)}")
+    full_path = resolve_requested_hdf5_file(workspace_path, file_path)
+    task = session.get(Task, task_id)
+    project_id = str(task.project_id) if task else None
+    viewer_context = build_viewer_context(
+        str(full_path),
+        display_path=file_path,
+        task_id=task_id,
+        project_id=project_id,
+        mode="server",
+    )
+    context_reference = create_context_reference(
+        viewer_context,
+        str(settings.HDF5_CONTEXTS_DIR),
+        settings.HDF5_VISUALIZER_TOKEN_TTL_SECONDS,
+    )
+    token = issue_context_token(
+        {"context_id": context_reference["context_id"]},
+        settings.HDF5_VISUALIZER_SECRET,
+        settings.HDF5_VISUALIZER_TOKEN_TTL_SECONDS,
+    )
+    service_url = build_hdf5_service_url(token)
+    return {
+        "status": "ready",
+        "path": file_path,
+        "file": file_path,
+        "project_id": project_id,
+        "context_id": context_reference["context_id"],
+        "token": token,
+        "service_url": service_url,
+        "viewer_path": (
+            f"/visualizer?taskId={task_id}"
+            f"&projectId={project_id or ''}"
+            f"&path={quote(file_path)}"
+            f"&token={quote(token)}"
+        ),
+    }
 
 
 @router.get("/tasks/{task_id}/visualizer/hdf5/status")
@@ -354,23 +445,15 @@ def get_hdf5_status(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Check status of running hdf5 visualizer process."""
+    """Return shared HDF5 service mode status."""
     _ = get_task_workspace(task_id, session, current_user, allow_public=True)
-    entry = _HDF5_PROC_REGISTRY.get(task_id)
-    if not entry:
-        return {"running": False}
-
-    proc = entry.get("process")
-    running = proc is not None and proc.poll() is None
-    if not running:
-        _terminate_process(task_id)
-        return {"running": False}
-
+    probe = probe_hdf5_service()
     return {
-        "running": True,
-        "pid": proc.pid,
-        "file": entry.get("file"),
-        "started_at": entry.get("started_at")
+        "running": probe.get("running", False),
+        "mode": "shared-service",
+        "service_url": settings.HDF5_VISUALIZER_BASE_URL,
+        "detail": probe.get("detail"),
+        "status_code": probe.get("status_code"),
     }
 
 
@@ -424,41 +507,10 @@ def get_active_hdf5_processes(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get list of all active HDF5 visualizer processes managed by this server.
-    Cleaning up dead processes on the fly.
+    Legacy endpoint kept for compatibility.
+    Per-task subprocesses are no longer used after switching to a shared viewer service.
     """
-    active_procs = []
-    # Identify dead tasks to cleanup
-    dead_tasks = []
-
-    for task_id, entry in _HDF5_PROC_REGISTRY.items():
-        proc = entry.get("process")
-        if proc and proc.poll() is None:
-            # Fetch Task Name
-            task_name = "Unknown Task"
-            try:
-                task = session.get(Task, task_id)
-                if task:
-                    task_name = task.name
-            except Exception:
-                pass
-
-            active_procs.append({
-                "task_id": task_id,
-                "task_name": task_name,
-                "pid": proc.pid,
-                "port": entry.get("port"),
-                "file": entry.get("file"),
-                "started_at": entry.get("started_at")
-            })
-        else:
-            dead_tasks.append(task_id)
-
-    # Cleanup registry
-    for tid in dead_tasks:
-        _terminate_process(tid)
-
-    return active_procs
+    return []
 
 
 @router.post("/tasks/{task_id}/visualizer/hdf5/stop")
@@ -467,10 +519,12 @@ def stop_hdf5_visualizer(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Stop running hdf5 visualizer process for a task."""
+    """Legacy no-op endpoint for the shared HDF5 viewer service."""
     _ = get_task_workspace(task_id, session, current_user, allow_public=True)
-    _terminate_process(task_id)
-    return {"status": "stopped"}
+    return {
+        "status": "noop",
+        "detail": "Per-task HDF5 processes are no longer used; the shared service stays running.",
+    }
 
 
 @router.post("/tasks/{task_id}/visualizer/export")

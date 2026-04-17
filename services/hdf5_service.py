@@ -14,8 +14,20 @@ class HDF5ReaderService:
         # root_dir is optional now as we prefer explicit workspace_path in query
         self.root_dir = list(Path(root_dir).glob("*")) if root_dir else None
 
-    def resolve_hdf5_file(self, task_id: str, workspace_path: Path) -> Optional[Path]:
+    def resolve_hdf5_file(
+        self,
+        task_id: str,
+        workspace_path: Path,
+        selected_path: Optional[Path] = None,
+    ) -> Optional[Path]:
         """Resolve an HDF5 results file for a task workspace."""
+        if selected_path:
+            if selected_path.exists() and selected_path.suffix.lower() == ".h5":
+                return selected_path
+            logger.warning(
+                f"Selected HDF5 file for task {task_id} is invalid or missing: {selected_path}"
+            )
+
         hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
         if not hdf5_file or not hdf5_file.exists():
             hdf5_file = self._find_any_hdf5(workspace_path)
@@ -24,9 +36,14 @@ class HDF5ReaderService:
             return None
         return hdf5_file
 
-    def get_jobs_df(self, task_id: str, workspace_path: Path) -> pd.DataFrame:
+    def get_jobs_df(
+        self,
+        task_id: str,
+        workspace_path: Path,
+        selected_path: Optional[Path] = None,
+    ) -> pd.DataFrame:
         """Load jobs table as DataFrame."""
-        hdf5_file = self.resolve_hdf5_file(task_id, workspace_path)
+        hdf5_file = self.resolve_hdf5_file(task_id, workspace_path, selected_path)
         if not hdf5_file:
             return pd.DataFrame()
         try:
@@ -36,9 +53,14 @@ class HDF5ReaderService:
             logger.error(f"Error reading jobs table for task {task_id}: {str(e)}")
             return pd.DataFrame()
 
-    def get_config_log(self, task_id: str, workspace_path: Path) -> Dict[str, Any]:
+    def get_config_log(
+        self,
+        task_id: str,
+        workspace_path: Path,
+        selected_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
         """Load config and log data from HDF5."""
-        hdf5_file = self.resolve_hdf5_file(task_id, workspace_path)
+        hdf5_file = self.resolve_hdf5_file(task_id, workspace_path, selected_path)
         if not hdf5_file:
             return {"config_data": None, "log_data": None}
 
@@ -85,15 +107,18 @@ class HDF5ReaderService:
         matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return matches[0]
 
-    def get_visualizer_metadata(self, task_id: str, workspace_path: Path) -> Dict[str, Any]:
+    def get_visualizer_metadata(
+        self,
+        task_id: str,
+        workspace_path: Path,
+        selected_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
         """
         Loads visualizer metadata from HDF5: variables, parameters, jobs table, config, log.
         Returns a dict with keys: variable_options, parameter_options, table_columns, jobs_data, config_data, log_data.
         """
         try:
-            hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
-            if not hdf5_file or not hdf5_file.exists():
-                hdf5_file = self._find_any_hdf5(workspace_path)
+            hdf5_file = self.resolve_hdf5_file(task_id, workspace_path, selected_path)
 
             if not hdf5_file or not hdf5_file.exists():
                 return {
@@ -161,6 +186,7 @@ class HDF5ReaderService:
                 "jobs_data": jobs_data,
                 "config_data": config_data,
                 "log_data": log_data,
+                "hdf5_file": str(hdf5_file),
             }
         except Exception as e:
             logger.error(f"Error loading visualizer metadata for task {task_id}: {str(e)}")
@@ -171,6 +197,7 @@ class HDF5ReaderService:
                 "jobs_data": [],
                 "config_data": None,
                 "log_data": None,
+                "hdf5_file": None,
             }
 
     def query_results(
@@ -181,7 +208,8 @@ class HDF5ReaderService:
         time_range: Tuple[float, float] = None,
         job_id: int = None,
         job_ids: List[int] = None,
-        limit: Optional[int] = 2000 # Default limit for visualization performance
+        limit: Optional[int] = 2000, # Default limit for visualization performance
+        selected_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """
         Query simulation results from HDF5 with optional LTTB downsampling.
@@ -195,7 +223,7 @@ class HDF5ReaderService:
             
         try:
             # 1. Fetch raw data
-            hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
+            hdf5_file = self.resolve_hdf5_file(task_id, workspace_path, selected_path)
             if hdf5_file and hdf5_file.exists():
                 raw_df = self._query_hdf5_df(hdf5_file, variables, time_range, target_jobs)
             else:
@@ -278,13 +306,18 @@ class HDF5ReaderService:
                 return pd.DataFrame()
             return store.select('results', where=where_str, columns=columns)
 
-    def get_summary_metrics(self, task_id: str, workspace_path: Path) -> List[Dict[str, Any]]:
+    def get_summary_metrics(
+        self,
+        task_id: str,
+        workspace_path: Path,
+        selected_path: Optional[Path] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Retrieves summary metrics from the HDF5 file.
         Returns a list of dicts: [{'job_id': 1, 'metric_name': 'X', 'metric_value': 10.0}, ...]
         """
         try:
-            hdf5_file = self._find_result_file(workspace_path, "sweep_results.h5")
+            hdf5_file = self.resolve_hdf5_file(task_id, workspace_path, selected_path)
             if not hdf5_file or not hdf5_file.exists():
                 # Fallback or return empty
                 return []
@@ -299,7 +332,13 @@ class HDF5ReaderService:
             logger.error(f"Error reading summary metrics for task {task_id}: {str(e)}")
             return []
 
-    def query_results_bi(self, task_id: str, workspace_path: Path, request_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def query_results_bi(
+        self,
+        task_id: str,
+        workspace_path: Path,
+        request_data: Dict[str, Any],
+        selected_path: Optional[Path] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Query results and format for Grafana SimpleJSON Datasource.
         Applies LTTB downsampling for large datasets.
@@ -322,6 +361,7 @@ class HDF5ReaderService:
             workspace_path, 
             variables=variables,
             time_range=(start_time, stop_time)
+            ,selected_path=selected_path
         )
         
         # Transform to Grafana format

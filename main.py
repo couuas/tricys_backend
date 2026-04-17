@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -82,10 +83,33 @@ async def recover_tasks():
         session.commit()
         logger.info(f"Recovery complete: {recovered_count} failed orphaned, {requeued_count} requeued pending")
 
+
+def _sync_packaged_assets():
+    packaged_assets_dir = settings.BASE_DIR / "assets"
+    runtime_assets_dir = settings.ASSETS_DIR
+
+    if not packaged_assets_dir.exists():
+        return
+
+    runtime_assets_dir.mkdir(parents=True, exist_ok=True)
+
+    for source_path in packaged_assets_dir.rglob("*"):
+        relative_path = source_path.relative_to(packaged_assets_dir)
+        target_path = runtime_assets_dir / relative_path
+
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            shutil.copy2(source_path, target_path)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     create_db_and_tables()
+    _sync_packaged_assets()
     
     # Recover tasks
     await recover_tasks()
@@ -164,7 +188,7 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 app.include_router(api_v2_router, prefix="/api/v2")
 
 # Mount static assets
-assets_dir = settings.BASE_DIR / "assets"
+assets_dir = settings.ASSETS_DIR
 assets_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=assets_dir), name="static")
 
