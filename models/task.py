@@ -35,6 +35,10 @@ class SimulationConfig(BaseModel):
     solver: Optional[str] = None
     tolerance: Optional[float] = Field(default=None, gt=0, le=1.0)
     variableFilter: Optional[str] = None
+    foc_enabled: Optional[bool] = None
+    foc_strategy: Optional[str] = None
+    foc_name: Optional[str] = None
+    foc_content: Optional[str] = None
     
     class Config:
         extra = 'allow'
@@ -46,6 +50,43 @@ class SimulationConfig(BaseModel):
         if v and not re.match(r'^[a-zA-Z0-9_.\-]+$', v):
             raise ValueError(f"model_name contains invalid characters: {v}")
         return v
+
+    @field_validator('foc_strategy')
+    @classmethod
+    def validate_foc_strategy(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        normalized = v.strip().lower()
+        if normalized not in {'table', 'array'}:
+            raise ValueError("foc_strategy must be either 'table' or 'array'")
+        return normalized
+
+    @field_validator('foc_name')
+    @classmethod
+    def validate_foc_name(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        if '/' in v or '\\' in v or '..' in v:
+            raise ValueError('foc_name must be a safe file name')
+        if not v.lower().endswith('.foc'):
+            raise ValueError('foc_name must end with .foc')
+        return v
+
+    @field_validator('foc_content')
+    @classmethod
+    def validate_foc_content(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if len(v.encode('utf-8')) > 262144:
+            raise ValueError('foc_content is too large')
+        return v
+
+    @model_validator(mode='after')
+    def validate_foc_bundle(self):
+        if self.foc_content:
+            if not self.foc_strategy:
+                raise ValueError('foc_strategy is required when foc_content is provided')
+        return self
 
 class FilterRuleConfig(BaseModel):
     """Configuration for result-based output filtering."""

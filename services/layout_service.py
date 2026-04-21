@@ -26,58 +26,230 @@ class LayoutService:
             "source_codes": {}
         }
 
+        def strip_line_comments(text: str) -> str:
+            return re.sub(r"//.*", "", text)
+
+        def split_declarations(block_text: str) -> List[str]:
+            declarations = []
+            current = []
+            paren_depth = 0
+            brace_depth = 0
+            bracket_depth = 0
+
+            for char in block_text:
+                current.append(char)
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth = max(0, paren_depth - 1)
+                elif char == '{':
+                    brace_depth += 1
+                elif char == '}':
+                    brace_depth = max(0, brace_depth - 1)
+                elif char == '[':
+                    bracket_depth += 1
+                elif char == ']':
+                    bracket_depth = max(0, bracket_depth - 1)
+                elif char == ';' and paren_depth == 0 and brace_depth == 0 and bracket_depth == 0:
+                    statement = ''.join(current).strip()
+                    if statement:
+                        declarations.append(statement)
+                    current = []
+
+            remainder = ''.join(current).strip()
+            if remainder:
+                declarations.append(remainder)
+
+            return declarations
+
+        def split_top_level(text: str, delimiter: str = ',') -> List[str]:
+            parts = []
+            current = []
+            paren_depth = 0
+            brace_depth = 0
+            bracket_depth = 0
+            in_string = False
+            string_quote = ''
+
+            for char in text:
+                current.append(char)
+
+                if in_string:
+                    if char == string_quote:
+                        in_string = False
+                    continue
+
+                if char in {'"', "'"}:
+                    in_string = True
+                    string_quote = char
+                elif char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth = max(0, paren_depth - 1)
+                elif char == '{':
+                    brace_depth += 1
+                elif char == '}':
+                    brace_depth = max(0, brace_depth - 1)
+                elif char == '[':
+                    bracket_depth += 1
+                elif char == ']':
+                    bracket_depth = max(0, bracket_depth - 1)
+                elif char == delimiter and paren_depth == 0 and brace_depth == 0 and bracket_depth == 0:
+                    item = ''.join(current[:-1]).strip()
+                    if item:
+                        parts.append(item)
+                    current = []
+
+            remainder = ''.join(current).strip()
+            if remainder:
+                parts.append(remainder)
+            return parts
+
+        def parse_modelica_value(value_text: str) -> Any:
+            text = value_text.strip()
+            if not text:
+                return ''
+
+            if text.startswith('{') and text.endswith('}'):
+                inner = text[1:-1].strip()
+                if not inner:
+                    return []
+                return [parse_modelica_value(part) for part in split_top_level(inner)]
+
+            if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+                return text[1:-1]
+
+            lower_text = text.lower()
+            if lower_text == 'true':
+                return True
+            if lower_text == 'false':
+                return False
+
+            try:
+                number = float(text)
+                if number.is_integer() and not any(token in text.lower() for token in ['.', 'e']):
+                    return int(number)
+                return number
+            except Exception:
+                return text
+
+        def format_dimensions(value: Any) -> str:
+            if not isinstance(value, list):
+                return '()'
+
+            dimensions = []
+            current = value
+            while isinstance(current, list):
+                dimensions.append(len(current))
+                current = current[0] if current else None
+            return '(' + ','.join(str(dimension) for dimension in dimensions) + ')'
+
+        def strip_annotation(statement: str) -> str:
+            annotation_match = re.search(r"\bannotation\s*\(", statement, re.IGNORECASE)
+            if not annotation_match:
+                return statement.strip()
+            return statement[:annotation_match.start()].strip()
+
+        def extract_instance_parameter_entries(statement: str, instance_name: str) -> List[Dict[str, Any]]:
+            entries = []
+            stripped_statement = strip_annotation(statement)
+            constructor_match = re.match(
+                rf"^\s*[A-Za-z_][\w\.]*\s+{re.escape(instance_name)}(?:\[[^\]]+\])?\s*\((.*)\)\s*$",
+                stripped_statement,
+                re.DOTALL,
+            )
+            if not constructor_match:
+                return entries
+
+            constructor_body = constructor_match.group(1).strip()
+            if not constructor_body:
+                return entries
+
+            for argument in split_top_level(constructor_body):
+                if '=' not in argument:
+                    continue
+                param_name, raw_value = argument.split('=', 1)
+                param_name = param_name.strip()
+                if not param_name:
+                    continue
+
+                parsed_value = parse_modelica_value(raw_value)
+                entries.append({
+                    'name': f'{instance_name}.{param_name}',
+                    'type': 'Unknown',
+                    'value': parsed_value,
+                    'defaultValue': parsed_value,
+                    'comment': '',
+                    'dimensions': format_dimensions(parsed_value),
+                })
+
+            return entries
+
+        def upsert_parameter_entry(entry: Dict[str, Any], preserve_existing_value: bool = False) -> None:
+            existing_index = next((index for index, item in enumerate(data['parameters']) if item.get('name') == entry.get('name')), None)
+            if existing_index is None:
+                data['parameters'].append(entry)
+                return
+
+            existing_entry = data['parameters'][existing_index]
+            merged_entry = {**existing_entry, **entry}
+            if preserve_existing_value:
+                merged_entry['value'] = existing_entry.get('value', merged_entry.get('value'))
+                merged_entry['defaultValue'] = existing_entry.get('defaultValue', merged_entry.get('defaultValue'))
+            data['parameters'][existing_index] = merged_entry
+
         # --- 1. Locate Cycle Model Block (Main System) ---
         # Match model Cycle ... end Cycle;
-        cycle_block_pattern = re.compile(r"model\s+Cycle(.*?)end\s+Cycle;", re.DOTALL | re.IGNORECASE)
+        cycle_block_pattern = re.compile(r"((?:within\s+[^;]+;\s*)?model\s+Cycle(.*?)end\s+Cycle;)", re.DOTALL | re.IGNORECASE)
         match_block = cycle_block_pattern.search(content)
         
-        cycle_content = match_block.group(1) if match_block else content
+        cycle_full_code = match_block.group(1).strip() if match_block else content.strip()
+        cycle_content = match_block.group(2) if match_block else content
+        data["source_codes"]["Cycle"] = cycle_full_code
 
-        # Map: Type -> Instance Name (e.g. "Plasma" -> "plasma")
-        instance_map = {} 
+        # Map: Type -> Instance Names (e.g. "Plasma" -> ["plasma"])
+        type_instance_map: Dict[str, List[str]] = {}
+        instance_parameter_overrides: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
         # --- 2. Parse Components [ROBUST STRATEGY] ---
-        # We process line by line or statement by statement to find "Type Name ...;"
-        # This is more robust than a single complex regex which might fail on formatting nuances.
+        declaration_section = re.split(
+            r"\b(?:equation|algorithm|initial\s+equation|initial\s+algorithm)\b",
+            cycle_content,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
 
-        # Regex to capture basic declaration: Type Name ... ;
-        # Excludes "connect(...)", "equation", "annotation", "parameter"
-        # We assume standard Modelica formatting where declaration ends with ; 
-        # but might have annotation before the ;
-        
-        # Simple pattern: Start of line or space, Type, space, Name, optional stuff, ;
-        # We need to capture the full statement to search for annotation inside it.
-        statement_pattern = re.compile(
-            r"^\s*([a-zA-Z0-9_]+)\s+([a-zA-Z0-9_]+)(.*?);", 
-            re.MULTILINE | re.DOTALL
-        )
-        
-        # Origin pattern to search WITHIN the statement
         origin_pattern = re.compile(r"origin\s*=\s*\{([-\d\.]+)\s*,\s*([-\d\.]+)\}")
+        declaration_pattern = re.compile(r"^\s*([A-Za-z_][\w\.]*)\s+([A-Za-z_][\w]*)\b", re.DOTALL)
 
         keywords = {"Modelica", "import", "parameter", "constant", 
                    "Real", "Integer", "Boolean", "String", 
                    "equation", "algorithm", "initial", "protected", "public",
-                   "connect", "annotation"}
+                   "connect", "annotation", "extends", "replaceable", "final", "input", "output"}
 
-        components_found = []
-        
-        for match in statement_pattern.finditer(cycle_content):
+        for statement in split_declarations(declaration_section):
+            clean_statement = strip_line_comments(statement).strip()
+            if not clean_statement:
+                continue
+
+            if clean_statement.lower().startswith("connect"):
+                continue
+
+            match = declaration_pattern.match(clean_statement)
+            if not match:
+                continue
+
             comp_type = match.group(1)
             comp_name = match.group(2)
-            rest_of_line = match.group(3)
             
             if comp_type in keywords:
                 continue
-                
-            # Heuristic: If type starts with lowercase, it might be a keyword we missed or a function
-            # Conventionally types are Capitalized. But we'll trust the exclusion list.
 
             # Basic position defaults
             x, y = 0.0, 0.0
             
             # Check for origin in the statement body
-            origin_match = origin_pattern.search(rest_of_line)
+            origin_match = origin_pattern.search(clean_statement)
             if origin_match:
                 try:
                     x = float(origin_match.group(1))
@@ -96,8 +268,16 @@ class LayoutService:
                 "position": {"x": x, "y": y},
                 "has_layout": bool(origin_match)
             })
-            
-            instance_map[comp_type] = comp_name
+
+            type_instance_map.setdefault(comp_type, []).append(comp_name)
+            data["source_codes"][comp_name] = statement.strip()
+
+            instance_entries = extract_instance_parameter_entries(clean_statement, comp_name)
+            if instance_entries:
+                override_map = instance_parameter_overrides.setdefault(comp_name, {})
+                for entry in instance_entries:
+                    override_map[entry['name'].split('.', 1)[1]] = entry
+                    upsert_parameter_entry(entry)
 
         # --- 3. Parse Connections ---
         connection_pattern = re.compile(r"connect\s*\(\s*([\w\.]+)\s*,\s*([\w\.]+)\s*\)")
@@ -117,66 +297,55 @@ class LayoutService:
             })
 
         # --- 4. Parse Sub-model Parameters & Source ---
-        model_def_pattern = re.compile(r"(model\s+([a-zA-Z0-9_]+)(.*?)end\s+\2;)", re.DOTALL)
+        model_def_pattern = re.compile(r"((?:model|block)\s+([A-Za-z_][\w]*)(.*?)end\s+\2;)", re.DOTALL)
         
         for match in model_def_pattern.finditer(content):
             full_code = match.group(1)
             model_type = match.group(2)
             model_body = match.group(3)
             
-            if model_type in instance_map:
-                instance_name = instance_map[model_type]
-                
-                # Save source code
-                data["source_codes"][instance_name] = full_code.strip()
-                
-                # Extract parameters: parameter Real fb = 0.05 "Description";
-                # Improved regex to stop at the start of the description string (starting with ")
-                # Capture Group 2 is the value. We use non-greedy matching until a space followed by a quote OR semicolon
-                param_pattern = re.compile(
-                    r"parameter\s+\w+\s+"                # parameter Type
-                    r"([a-zA-Z0-9_]+)"                   # Name (Group 1)
-                    r"(?:\[.*?\])?"                      # Optional array dims
-                    r"\s*=\s*"                           # = 
-                    r"([^;]*?)"                          # Value (Group 2) - extract everything first, refine later
-                    r"\s*(?:\"(.*?)\"\s*)?;"             # Optional Description "..." and ending ;
-                )
-                
-                for p_match in param_pattern.finditer(model_body):
-                    p_name = p_match.group(1)
-                    raw_val = p_match.group(2).strip()
+            if model_type in type_instance_map:
+                for instance_name in type_instance_map[model_type]:
+                    data["source_codes"][instance_name] = full_code.strip()
+
+                    param_pattern = re.compile(
+                        r"parameter\s+([A-Za-z_][\w\.]*)\s+"
+                        r"([a-zA-Z0-9_]+)"
+                        r"(\s*\[[^\]]+\])?"
+                        r"(?:\s*\([^)]*\))?"
+                        r"\s*=\s*"
+                        r"([^;]*?)"
+                        r"\s*(?:\"(.*?)\"\s*)?;"
+                    )
                     
-                    # If raw_val contains the description (because regex didn't split well), fix it
-                    # The previous regex `([^;]+?)` combined with `(?:\"...\" )?;` relies on the quote being present.
-                    # If value is `24 "desc"`, extracting `24` needs care.
-                    
-                    # Split by first quote if exists
-                    if '"' in raw_val:
-                        p_val_str = raw_val.split('"')[0].strip()
-                    else:
-                        p_val_str = raw_val
-                        
-                    try:
-                        # Handle arrays {1, 2} -> [1, 2]
-                        if p_val_str.startswith('{') and p_val_str.endswith('}'):
-                            py_list_str = p_val_str.replace('{', '[').replace('}', ']')
-                            val = eval(py_list_str)
+                    for p_match in param_pattern.finditer(model_body):
+                        p_type = p_match.group(1)
+                        p_name = p_match.group(2)
+                        p_dims = p_match.group(3) or ''
+                        raw_val = p_match.group(4).strip()
+                        val = parse_modelica_value(raw_val)
+
+                        key = f"{instance_name}.{p_name}"
+                        base_entry = {
+                            "name": key,
+                            "type": p_type,
+                            "value": val,
+                            "defaultValue": val,
+                            "comment": p_match.group(5).strip() if p_match.group(5) else "",
+                            "dimensions": p_dims.strip() if p_dims else format_dimensions(val)
+                        }
+
+                        override_entry = instance_parameter_overrides.get(instance_name, {}).get(p_name)
+                        if override_entry:
+                            merged_entry = {
+                                **base_entry,
+                                "value": override_entry.get("value", val),
+                                "defaultValue": override_entry.get("defaultValue", val),
+                                "dimensions": override_entry.get("dimensions") or base_entry["dimensions"],
+                            }
+                            upsert_parameter_entry(merged_entry, preserve_existing_value=False)
                         else:
-                            val = float(p_val_str)
-                    except:
-                        val = p_val_str
-                    
-                    key = f"{instance_name}.{p_name}"
-                    
-                    # Store as structured object
-                    data["parameters"].append({
-                        "name": key,
-                        "type": "Real", # Regex matched parameter Real ...
-                        "value": val, # Initialize current value with default
-                        "defaultValue": val, # The raw valid value
-                        "comment": p_match.group(3).strip() if p_match.group(3) else "",
-                        "dimensions": "()" # Default scalar, could parse array dims better later
-                    })
+                            upsert_parameter_entry(base_entry, preserve_existing_value=False)
 
         logger.info(f"Parsed structure: {len(data['components'])} components, {len(data['connections'])} connections")
         return data

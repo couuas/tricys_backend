@@ -3,10 +3,12 @@ from fastapi.responses import FileResponse
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 import os
+import re
 from sqlmodel import Session, select
 
 from tricys_backend.services.project_service import ProjectService 
 from tricys_backend.services.file_manager import FileManager
+from tricys_backend.services.layout_service import LayoutService
 from tricys_backend.utils.db import get_session
 from tricys_backend.models.project import Project
 from tricys_backend.models.user import User
@@ -14,6 +16,64 @@ from tricys_backend.models.goview_project import GoviewProject
 from tricys_backend.api.deps import get_current_user
 
 router = APIRouter()
+
+
+def refresh_project_structure_if_needed(project: Project, session: Session) -> Project:
+    if not project.model_file_path or not os.path.exists(project.model_file_path):
+        return project
+
+    structure = project.structure_json or {}
+    source_codes = structure.get("source_codes", {}) or {}
+    components = structure.get("components", []) or []
+    parameters = project.parameters_json or []
+    parameter_names = {
+        item.get("name")
+        for item in parameters
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    needs_refresh = not project.defaults_json or not parameters or not source_codes
+
+    if not needs_refresh and components:
+        component_ids = {component.get("id") for component in components if component.get("id")}
+        if "Cycle" not in source_codes or not component_ids.issubset(set(source_codes.keys())):
+            needs_refresh = True
+
+    if not needs_refresh:
+        for component_id, source_code in source_codes.items():
+            if component_id == "Cycle" or not isinstance(source_code, str):
+                continue
+            stripped_source = source_code.strip()
+            if stripped_source.startswith(("model ", "block ")):
+                continue
+            constructor_match = re.search(rf"\b{re.escape(component_id)}(?:\[[^\]]+\])?\s*\((.*)\)", stripped_source, re.DOTALL)
+            if not constructor_match:
+                continue
+            if '=' not in constructor_match.group(1):
+                continue
+            prefix = f"{component_id}."
+            if not any(name.startswith(prefix) for name in parameter_names):
+                needs_refresh = True
+                break
+
+    if not needs_refresh:
+        return project
+
+    with open(project.model_file_path, "r", encoding="utf-8") as model_file:
+        refreshed_struct = LayoutService.parse_model_structure(model_file.read())
+
+    extracted_params = refreshed_struct.get("parameters", [])
+    project.structure_json = refreshed_struct
+    project.defaults_json = extracted_params
+    project.parameters_json = [dict(item) for item in extracted_params]
+    project.updated_at = datetime.now(timezone.utc)
+    flag_modified(project, "structure_json")
+    flag_modified(project, "defaults_json")
+    flag_modified(project, "parameters_json")
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return project
 
 @router.get("/export", response_class=FileResponse)
 def export_current_project(
@@ -259,6 +319,7 @@ def get_project_details(
     current_user: User = Depends(get_current_user)
 ):
     project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    project = refresh_project_structure_if_needed(project, session)
     return {
         "id": project.id,
         "name": project.name,
@@ -327,6 +388,7 @@ def get_parameters(
     current_user: User = Depends(get_current_user)
 ):
     project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    project = refresh_project_structure_if_needed(project, session)
     return project.parameters_json or []
 
 @router.get("/{project_id}/defaults")
@@ -336,6 +398,7 @@ def get_defaults(
     current_user: User = Depends(get_current_user)
 ):
     project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    project = refresh_project_structure_if_needed(project, session)
     return project.defaults_json or []
 
 @router.post("/{project_id}/parameters")
@@ -552,18 +615,29 @@ def get_component_source(
 ):
     """Retrieves source code for a specific component from model structure."""
     project = get_user_project(session, project_id, current_user.id, allow_public=True)
-    
-    # Source codes are stored in structure_json["source_codes"]
+
+    def lookup_source(structure: Dict[str, Any]) -> Optional[str]:
+        source_codes = structure.get("source_codes", {})
+        cid_lower = component_id.lower()
+        for key, value in source_codes.items():
+            if key.lower() == cid_lower:
+                return value
+        return None
+
+    project = refresh_project_structure_if_needed(project, session)
     struct = project.structure_json or {}
-    source_codes = struct.get("source_codes", {})
-    
-    # Try case-insensitive match
-    source = None
-    cid_lower = component_id.lower()
-    for k, v in source_codes.items():
-        if k.lower() == cid_lower:
-            source = v
-            break
+    source = lookup_source(struct)
+
+    if source is None and project.model_file_path and os.path.exists(project.model_file_path):
+        try:
+            project = refresh_project_structure_if_needed(project, session)
+            struct = project.structure_json or {}
+            source = lookup_source(struct)
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh project structure for component source lookup",
+                extra={"project_id": project_id, "component_id": component_id, "error": str(exc)}
+            )
             
     if source is None:
         raise HTTPException(status_code=404, detail=f"Source for component {component_id} not found")

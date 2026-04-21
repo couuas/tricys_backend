@@ -113,6 +113,24 @@ class TaskQueue:
                         logger.error(f"Source model file missing: {source_path}")
                         raise FileNotFoundError(f"Source model file not found at {source_path}")
 
+                simulation_config = config.get("simulation", {}) if isinstance(config, dict) else {}
+                foc_content = simulation_config.get("foc_content")
+                if foc_content:
+                    foc_dir = workspace_path / "foc"
+                    foc_dir.mkdir(parents=True, exist_ok=True)
+
+                    raw_name = simulation_config.get("foc_name") or "task_input.foc"
+                    safe_name = Path(raw_name).name or "task_input.foc"
+                    if not safe_name.lower().endswith(".foc"):
+                        safe_name = f"{safe_name}.foc"
+
+                    foc_path = foc_dir / safe_name
+                    foc_path.write_text(foc_content, encoding="utf-8")
+
+                    simulation_config["foc_path"] = str(Path("foc") / safe_name)
+                    simulation_config.pop("foc_content", None)
+                    config["simulation"] = simulation_config
+
                 config_path = FileManager.save_config(workspace_path, config)
                 
                 # Update Task
