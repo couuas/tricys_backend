@@ -13,10 +13,9 @@ from tricys_backend.utils.db import get_session
 # So they will send the `token` header.
 # We should probably support `require_token` here too, or standard `get_current_user` if adapters are flexible.
 # Let's use `require_token` to be safe and consistent with Goview context.
-from tricys_backend.api.v2.goview.deps import require_token
+from tricys_backend.api.v2.goview.deps import GoviewTokenContext, require_goview_context
 from tricys_backend.api.v2.goview.responses import success, error
 
-from tricys_backend.models.user import User
 from tricys_backend.models.project import Project
 from tricys_backend.models.task import Task
 from tricys_backend.services.file_browser_service import FileBrowserService
@@ -29,7 +28,14 @@ file_browser = FileBrowserService()
 hdf5_service = HDF5ReaderService()
 
 # Helper to verify Tricys project access (not GoviewProject)
-def get_user_project(session: Session, project_id: str, user_id: str) -> Project:
+def get_user_project(
+    session: Session,
+    project_id: str,
+    user_id: str,
+    scoped_project_id: Optional[str] = None,
+) -> Project:
+    if scoped_project_id and project_id != scoped_project_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this project")
     project = session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -37,9 +43,16 @@ def get_user_project(session: Session, project_id: str, user_id: str) -> Project
         raise HTTPException(status_code=403, detail="Not authorized to access this project")
     return project
 
-def get_user_task(session: Session, task_id: str, user_id: str) -> Task:
+def get_user_task(
+    session: Session,
+    task_id: str,
+    user_id: str,
+    scoped_project_id: Optional[str] = None,
+) -> Task:
     # Join with Project to verify ownership
     query = select(Task).join(Project).where(Task.id == task_id, Project.user_id == user_id)
+    if scoped_project_id:
+        query = query.where(Project.id == scoped_project_id)
     task = session.exec(query).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -67,10 +80,10 @@ class TimeSeriesBatchRequest(BaseModel):
 def goview_summary(
     project_id: str = Query(..., alias="projectId"),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     try:
-        project = get_user_project(session, project_id, current_user.id)
+        project = get_user_project(session, project_id, current_ctx.user.id, current_ctx.tricys_project_id)
         latest_task = session.exec(
             select(Task)
             .where(Task.project_id == project.id)
@@ -97,10 +110,10 @@ def goview_tasks(
     project_id: str = Query(..., alias="projectId"),
     limit: int = Query(10, ge=1, le=100),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     try:
-        project = get_user_project(session, project_id, current_user.id)
+        project = get_user_project(session, project_id, current_ctx.user.id, current_ctx.tricys_project_id)
         tasks = session.exec(
             select(Task)
             .where(Task.project_id == project.id)
@@ -124,14 +137,61 @@ def goview_tasks(
         return error(e.status_code, e.detail)
 
 
+@router.get("/parameters")
+def goview_parameters(
+    project_id: str = Query(..., alias="projectId"),
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        project = get_user_project(session, project_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        parameters = project.parameters_json or project.defaults_json or []
+        if isinstance(parameters, dict):
+            parameters = [
+                {"name": key, "value": value}
+                for key, value in parameters.items()
+            ]
+        return success(parameters)
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+
+
+@router.get("/latest-task")
+def goview_latest_task(
+    project_id: str = Query(..., alias="projectId"),
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        project = get_user_project(session, project_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        latest_task = session.exec(
+            select(Task)
+            .where(Task.project_id == project.id)
+            .order_by(Task.created_at.desc())
+            .limit(1)
+        ).first()
+        if not latest_task:
+            return success(None)
+        return success({
+            "id": latest_task.id,
+            "name": latest_task.name,
+            "status": latest_task.status,
+            "createdAt": latest_task.created_at,
+            "updatedAt": latest_task.updated_at,
+            "type": latest_task.type,
+        })
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+
+
 @router.get("/metrics")
 def goview_metrics(
     task_id: str = Query(..., alias="taskId"),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     try:
-        task = get_user_task(session, task_id, current_user.id)
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
         workspace_path = get_task_workspace(task)
 
         metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
@@ -159,10 +219,10 @@ def goview_timeseries(
     job_id: Optional[int] = Query(None, alias="jobId"),
     limit: int = Query(2000, ge=1, le=200000),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     try:
-        task = get_user_task(session, task_id, current_user.id)
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
         workspace_path = get_task_workspace(task)
 
         data = hdf5_service.query_results(
@@ -185,10 +245,10 @@ def goview_timeseries(
 def goview_timeseries_batch(
     payload: TimeSeriesBatchRequest = Body(...),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     try:
-        task = get_user_task(session, payload.taskId, current_user.id)
+        task = get_user_task(session, payload.taskId, current_ctx.user.id, current_ctx.tricys_project_id)
         workspace_path = get_task_workspace(task)
 
         time_range: Optional[Tuple[float, float]] = None
@@ -219,10 +279,10 @@ def goview_timeseries_batch(
 def goview_files(
     task_id: str = Query(..., alias="taskId"),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     try:
-        task = get_user_task(session, task_id, current_user.id)
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
         workspace_path = get_task_workspace(task)
         files = file_browser.list_files(workspace_path)
         return success(files)
@@ -235,12 +295,12 @@ def goview_files_download(
     task_id: str = Query(..., alias="taskId"),
     path: str = Query(...),
     session: Session = Depends(get_session),
-    current_user: User = Depends(require_token)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     # This returns a FileResponse directly, not JSON.
     # Front-end should handle binary download.
     try:
-        task = get_user_task(session, task_id, current_user.id)
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
         workspace_path = get_task_workspace(task)
         full_path = file_browser.get_file_path(workspace_path, path)
         return FileResponse(full_path, filename=full_path.name)
@@ -252,9 +312,11 @@ def goview_files_download(
 @router.get("/analysis/tasks")
 def goview_analysis_tasks(
     project_id: Optional[str] = Query(None, alias="projectId"),
-    current_user: User = Depends(require_token)
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
-    tasks = AnalysisService.get_tasks(current_user.id, project_id)
+    get_user_project(session, project_id, current_ctx.user.id, current_ctx.tricys_project_id)
+    tasks = AnalysisService.get_tasks(current_ctx.user.id, project_id)
     data = [
         {
             "id": task.id,
@@ -272,9 +334,11 @@ def goview_analysis_tasks(
 @router.get("/analysis/report")
 def goview_analysis_report(
     task_id: str = Query(..., alias="taskId"),
-    current_user: User = Depends(require_token)
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
-    task = AnalysisService.get_task(task_id, current_user.id)
+    get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
+    task = AnalysisService.get_task(task_id, current_ctx.user.id)
     if not task:
         return error(404, "Task not found")
 

@@ -9,11 +9,19 @@ from sqlmodel import Session, select
 from tricys_backend.services.project_service import ProjectService 
 from tricys_backend.services.file_manager import FileManager
 from tricys_backend.services.layout_service import LayoutService
+from tricys_backend.core.security import create_access_token
 from tricys_backend.utils.db import get_session
 from tricys_backend.models.project import Project
 from tricys_backend.models.user import User
 from tricys_backend.models.goview_project import GoviewProject
+from tricys_backend.models.project_page import ProjectPage
+from tricys_backend.models.task import Task
 from tricys_backend.api.deps import get_current_user
+from tricys_backend.services.project_page_templates import (
+    build_project_page_template,
+    list_project_page_data_sources,
+    list_project_page_templates,
+)
 
 router = APIRouter()
 
@@ -238,6 +246,101 @@ def get_user_project(session: Session, project_id: str, user_id: str, allow_publ
         return project
     raise HTTPException(status_code=403, detail="Not authorized to access this project")
 
+
+@router.post("/{project_id}/goview/session", response_model=Dict[str, Any])
+def create_goview_project_session(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    token = create_access_token(
+        current_user.id,
+        extra_claims={
+            "operator_user_id": current_user.id,
+            "tricys_project_id": project.id,
+            "scope": "goview:project",
+        },
+    )
+    return {
+        "token": token,
+        "project_id": project.id,
+        "scope": "goview:project",
+    }
+
+
+def serialize_project_page(project: Project, page: ProjectPage, goview_project: GoviewProject) -> Dict[str, Any]:
+    return {
+        "id": page.id,
+        "project_id": project.id,
+        "goview_project_id": goview_project.id,
+        "page_key": page.page_key,
+        "page_name": page.page_name,
+        "page_type": page.page_type,
+        "is_default": page.is_default,
+        "visibility": page.visibility,
+        "published": goview_project.state == 1,
+        "state": goview_project.state,
+        "index_image": goview_project.index_image,
+        "remarks": page.remarks or goview_project.remarks,
+        "created_at": page.created_at,
+        "updated_at": page.updated_at,
+        "schema_version": 2,
+        "editor": "goview"
+    }
+
+
+def serialize_project_page_with_release(
+    session: Session,
+    project: Project,
+    page: ProjectPage,
+    goview_project: GoviewProject,
+) -> Dict[str, Any]:
+    payload = serialize_project_page(project, page, goview_project)
+    active_release = ProjectService.get_active_project_page_release(session, page.id)
+    releases = ProjectService.list_project_page_releases(session, page.id, include_inactive=True)
+    payload["active_release"] = (
+        {
+            "id": active_release.id,
+            "version": active_release.version,
+            "published_at": active_release.published_at,
+        }
+        if active_release
+        else None
+    )
+    payload["active_release_version"] = active_release.version if active_release else None
+    payload["release_count"] = len(releases)
+    return payload
+
+
+def serialize_project_page_release(release) -> Dict[str, Any]:
+    content_summary = {"component_count": 0, "data_pond_count": 0, "background": None, "theme": None}
+    try:
+        content = json.loads(release.content or "{}")
+        component_list = content.get("componentList") or []
+        request_global_config = content.get("requestGlobalConfig") or {}
+        canvas_config = content.get("editCanvasConfig") or {}
+        content_summary = {
+            "component_count": len(component_list),
+            "data_pond_count": len(request_global_config.get("requestDataPond") or []),
+            "background": canvas_config.get("background"),
+            "theme": canvas_config.get("chartThemeColor"),
+        }
+    except Exception:
+        pass
+    return {
+        "id": release.id,
+        "page_id": release.page_id,
+        "project_id": release.project_id,
+        "goview_project_id": release.goview_project_id,
+        "version": release.version,
+        "remarks": release.remarks,
+        "index_image": release.index_image,
+        "published_at": release.published_at,
+        "is_active": bool(release.is_active),
+        "content_summary": content_summary,
+    }
+
 @router.post("/{project_id}/fork", response_model=Project)
 def fork_project(
     project_id: str,
@@ -331,6 +434,239 @@ def get_project_details(
         "visual_config": project.visual_config or {},
         "simulation_config": project.simulation_config or {}
     }
+
+
+@router.get("/page-templates", response_model=List[Dict[str, Any]])
+def get_project_page_templates(
+    current_user: User = Depends(get_current_user)
+):
+    return list_project_page_templates()
+
+
+@router.get("/{project_id}/page-data-sources", response_model=List[Dict[str, Any]])
+def get_project_page_data_sources(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    return list_project_page_data_sources(project)
+
+
+@router.get("/{project_id}/pages", response_model=Dict[str, Any])
+def list_project_pages(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    items: List[Dict[str, Any]] = []
+
+    owned_by_user = project.user_id == current_user.id
+    if owned_by_user:
+        ProjectService.ensure_default_project_page(
+            session,
+            project=project,
+            user_id=current_user.id,
+            commit=True,
+        )
+
+    pages = ProjectService.list_project_pages(session, project.id)
+    for page in pages:
+        goview_project = session.get(GoviewProject, page.goview_project_id)
+        if not goview_project or goview_project.is_delete == 1:
+            continue
+        if not owned_by_user and goview_project.state != 1:
+            continue
+        items.append(serialize_project_page_with_release(session, project, page, goview_project))
+
+    return {
+        "project_id": project.id,
+        "items": items,
+        "total": len(items),
+        "phase": "phase-2-multi-page"
+    }
+
+
+@router.post("/{project_id}/pages/ensure", response_model=Dict[str, Any])
+def ensure_project_page(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id)
+    created = ProjectService.ensure_default_project_page(
+        session,
+        project=project,
+        user_id=current_user.id,
+        commit=True,
+    )
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to initialize default page")
+    goview_project = session.get(GoviewProject, created.goview_project_id)
+    if not goview_project:
+        raise HTTPException(status_code=500, detail="Linked GoView editor project not found")
+    return serialize_project_page_with_release(session, project, created, goview_project)
+
+
+@router.post("/{project_id}/pages", response_model=Dict[str, Any])
+def create_project_page(
+    project_id: str,
+    payload: Dict[str, Any] = Body(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id)
+    template_key = str(payload.get("template_key") or payload.get("templateKey") or "").strip()
+    page_name = str(payload.get("page_name") or payload.get("pageName") or "New Page").strip()
+    if not page_name:
+        raise HTTPException(status_code=400, detail="page_name is required")
+    if len(page_name) > 200:
+        raise HTTPException(status_code=400, detail="page_name too long")
+
+    template_payload = None
+    if template_key:
+        latest_task = session.exec(
+            select(Task)
+            .where(Task.project_id == project.id)
+            .order_by(Task.created_at.desc())
+            .limit(1)
+        ).first()
+        template_payload = build_project_page_template(project, template_key, page_name, latest_task=latest_task)
+
+    created = ProjectService.create_project_page(
+        session,
+        project=project,
+        user_id=current_user.id,
+        page_name=page_name,
+        page_type=str((template_payload or {}).get("page_type") or payload.get("page_type") or payload.get("pageType") or "custom"),
+        remarks=str((template_payload or {}).get("remarks") or payload.get("remarks") or ""),
+        template_key=str((template_payload or {}).get("template_key") or template_key or ""),
+        is_default=bool(payload.get("is_default") or payload.get("isDefault") or False),
+        content=str((template_payload or {}).get("content") or payload.get("content") or "{}"),
+        state=int(payload.get("state", -1)),
+        index_image=str(payload.get("index_image") or payload.get("indexImage") or ""),
+    )
+    goview_project = session.get(GoviewProject, created.goview_project_id)
+    if not goview_project:
+        raise HTTPException(status_code=500, detail="Linked GoView editor project not found")
+    return serialize_project_page_with_release(session, project, created, goview_project)
+
+
+@router.patch("/{project_id}/pages/{page_id}/publish", response_model=Dict[str, Any])
+def publish_project_page(
+    project_id: str,
+    page_id: str,
+    payload: Dict[str, Any] = Body(default={}),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id)
+    page = ProjectService.get_project_page(session, page_id)
+    if not page or page.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Page not found")
+    goview_project = session.get(GoviewProject, page.goview_project_id)
+    if not goview_project or goview_project.is_delete == 1:
+        raise HTTPException(status_code=404, detail="Linked GoView editor project not found")
+    if goview_project.create_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to manage this page")
+
+    published = payload.get("published")
+    state = payload.get("state")
+    if state is None:
+        state = 1 if published is not False else -1
+
+    updated = ProjectService.update_project_page_publish_state(
+        session,
+        page=page,
+        published=int(state) == 1,
+        created_by=current_user.id,
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update page state")
+    refreshed_goview = session.get(GoviewProject, updated.goview_project_id)
+    if not refreshed_goview:
+        raise HTTPException(status_code=500, detail="Linked GoView editor project not found")
+    return serialize_project_page_with_release(session, project, updated, refreshed_goview)
+
+
+@router.get("/{project_id}/pages/{page_id}/releases", response_model=List[Dict[str, Any]])
+def list_project_page_releases(
+    project_id: str,
+    page_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id, allow_public=True)
+    page = ProjectService.get_project_page(session, page_id)
+    if not page or page.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Page not found")
+    goview_project = session.get(GoviewProject, page.goview_project_id)
+    if not goview_project or goview_project.is_delete == 1:
+        raise HTTPException(status_code=404, detail="Linked GoView editor project not found")
+    if project.user_id != current_user.id and goview_project.state != 1:
+        raise HTTPException(status_code=403, detail="Not authorized to access release history")
+
+    releases = ProjectService.list_project_page_releases(
+        session,
+        page.id,
+        include_inactive=project.user_id == current_user.id,
+    )
+    return [serialize_project_page_release(release) for release in releases]
+
+
+@router.post("/{project_id}/pages/{page_id}/releases/{release_id}/restore", response_model=Dict[str, Any])
+def restore_project_page_release(
+    project_id: str,
+    page_id: str,
+    release_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id)
+    page = ProjectService.get_project_page(session, page_id)
+    if not page or page.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    goview_project = session.get(GoviewProject, page.goview_project_id)
+    if not goview_project or goview_project.is_delete == 1:
+        raise HTTPException(status_code=404, detail="Linked GoView editor project not found")
+    if goview_project.create_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to manage this page")
+
+    release = ProjectService.get_project_page_release(session, release_id)
+    if not release or release.page_id != page.id:
+        raise HTTPException(status_code=404, detail="Release not found")
+
+    restored = ProjectService.restore_project_page_release(session, page, release)
+    if not restored:
+        raise HTTPException(status_code=500, detail="Failed to restore release")
+    refreshed_goview = session.get(GoviewProject, restored.goview_project_id)
+    if not refreshed_goview:
+        raise HTTPException(status_code=500, detail="Linked GoView editor project not found")
+    return serialize_project_page_with_release(session, project, restored, refreshed_goview)
+
+
+@router.delete("/{project_id}/pages/{page_id}", response_model=Dict[str, Any])
+def delete_project_page(
+    project_id: str,
+    page_id: str,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    project = get_user_project(session, project_id, current_user.id)
+    page = ProjectService.get_project_page(session, page_id)
+    if not page or page.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Page not found")
+    goview_project = session.get(GoviewProject, page.goview_project_id)
+    if not goview_project or goview_project.is_delete == 1:
+        raise HTTPException(status_code=404, detail="Linked GoView editor project not found")
+    if goview_project.create_user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to manage this page")
+
+    ProjectService.delete_project_page(session, page)
+
+    return {"status": "success", "project_id": project.id, "page_id": page_id}
 
 @router.delete("/{project_id}")
 def delete_project(

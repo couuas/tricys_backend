@@ -37,6 +37,8 @@ class SimulationConfig(BaseModel):
     variableFilter: Optional[str] = None
     foc_enabled: Optional[bool] = None
     foc_strategy: Optional[str] = None
+    foc_path: Optional[str] = None
+    foc_component: Optional[str] = None
     foc_name: Optional[str] = None
     foc_content: Optional[str] = None
     
@@ -83,9 +85,66 @@ class SimulationConfig(BaseModel):
 
     @model_validator(mode='after')
     def validate_foc_bundle(self):
-        if self.foc_content:
-            if not self.foc_strategy:
-                raise ValueError('foc_strategy is required when foc_content is provided')
+        if (self.foc_content or self.foc_path) and not self.foc_component:
+            raise ValueError('foc_component is required when foc_content or foc_path is provided')
+        return self
+
+
+class FocConfig(BaseModel):
+    """Top-level FOC configuration for task payloads."""
+
+    foc_path: Optional[str] = None
+    foc_component: Optional[str] = None
+    foc_name: Optional[str] = None
+    foc_content: Optional[str] = None
+
+    class Config:
+        extra = 'allow'
+
+    @field_validator('foc_path')
+    @classmethod
+    def validate_foc_path(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        if '..' in v:
+            raise ValueError('foc_path must not contain parent-directory traversal')
+        return v
+
+    @field_validator('foc_component')
+    @classmethod
+    def validate_foc_component(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        normalized = str(v).strip()
+        if not normalized:
+            raise ValueError('foc_component must be a non-empty string')
+        return normalized
+
+    @field_validator('foc_name')
+    @classmethod
+    def validate_foc_name(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        if '/' in v or '\\' in v or '..' in v:
+            raise ValueError('foc_name must be a safe file name')
+        if not v.lower().endswith('.foc'):
+            raise ValueError('foc_name must end with .foc')
+        return v
+
+    @field_validator('foc_content')
+    @classmethod
+    def validate_foc_content(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if len(v.encode('utf-8')) > 262144:
+            raise ValueError('foc_content is too large')
+        return v
+
+    @model_validator(mode='after')
+    def validate_foc_bundle(self):
+        if self.foc_content or self.foc_path:
+            if not self.foc_component:
+                raise ValueError('foc_component is required when foc_content or foc_path is provided')
         return self
 
 class FilterRuleConfig(BaseModel):
@@ -117,6 +176,7 @@ class ConfigJsonSchema(BaseModel):
     """Schema for validating config_json structure."""
     paths: Optional[PathsConfig] = None
     simulation: Optional[SimulationConfig] = None
+    foc: Optional[FocConfig] = None
     # Support direct dictionary for parameters as per user standard
     simulation_parameters: Optional[Dict[str, Union[List[Any], Any]]] = None
     model_name: Optional[str] = None

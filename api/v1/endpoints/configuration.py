@@ -9,7 +9,7 @@ from tricys_backend.utils.db import get_session
 from tricys_backend.models.user import User
 from tricys_backend.models.project import Project
 from tricys_backend.api.deps import get_current_user
-from tricys.simulation.foc import FOCParseError, build_foc_preview
+from tricys.core.foc import FOCParseError, build_foc_preview
 
 router = APIRouter()
 

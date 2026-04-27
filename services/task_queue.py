@@ -14,6 +14,90 @@ import psutil
 import shutil
 import os
 
+
+def _resolve_foc_source_path(foc_path: str, source_roots: list[Path] | None = None) -> Path:
+    candidate = Path(foc_path)
+    candidate_paths = []
+    if candidate.is_absolute():
+        candidate_paths.append(candidate)
+    else:
+        for root in source_roots or []:
+            candidate_paths.append((root / candidate).resolve())
+        candidate_paths.append(candidate.resolve())
+
+    for path in candidate_paths:
+        if path.exists() and path.is_file():
+            return path
+
+    raise FileNotFoundError(f"FOC file not found: {foc_path}")
+
+
+def _prepare_foc_config_for_workspace(
+    config: dict,
+    workspace_path: Path,
+    source_roots: list[Path] | None = None,
+) -> dict:
+    if not isinstance(config, dict):
+        return config
+
+    normalized_config = dict(config)
+    foc_config = dict(normalized_config.get("foc") or {})
+    simulation_config = dict(normalized_config.get("simulation") or {})
+
+    if not foc_config:
+        legacy_component = simulation_config.get("foc_component")
+        legacy_path = simulation_config.get("foc_path")
+        legacy_name = simulation_config.get("foc_name")
+        legacy_content = simulation_config.get("foc_content")
+        if any([legacy_component, legacy_path, legacy_name, legacy_content]):
+            foc_config = {
+                "foc_component": legacy_component,
+                "foc_path": legacy_path,
+                "foc_name": legacy_name,
+                "foc_content": legacy_content,
+            }
+
+    foc_component = str(foc_config.get("foc_component") or "").strip()
+    foc_content = foc_config.get("foc_content")
+    foc_path_value = str(foc_config.get("foc_path") or "").strip()
+    foc_name = str(foc_config.get("foc_name") or "").strip()
+
+    if not foc_component or (not foc_content and not foc_path_value):
+        normalized_config["simulation"] = simulation_config
+        if foc_config:
+            normalized_config["foc"] = foc_config
+        return normalized_config
+
+    foc_dir = workspace_path / "foc"
+    foc_dir.mkdir(parents=True, exist_ok=True)
+
+    if foc_content:
+        safe_name = Path(foc_name or "task_input.foc").name or "task_input.foc"
+        if not safe_name.lower().endswith(".foc"):
+            safe_name = f"{safe_name}.foc"
+        foc_workspace_path = foc_dir / safe_name
+        foc_workspace_path.write_text(str(foc_content), encoding="utf-8")
+    else:
+        source_path = _resolve_foc_source_path(foc_path_value, source_roots=source_roots)
+        safe_name = Path(foc_name or source_path.name).name or source_path.name
+        if not safe_name.lower().endswith(".foc"):
+            safe_name = source_path.name
+        foc_workspace_path = foc_dir / safe_name
+        shutil.copy2(source_path, foc_workspace_path)
+
+    foc_config["foc_path"] = (Path("foc") / foc_workspace_path.name).as_posix()
+    foc_config["foc_name"] = foc_workspace_path.name
+    foc_config.pop("foc_content", None)
+
+    simulation_config.pop("foc_content", None)
+    simulation_config.pop("foc_name", None)
+    simulation_config.pop("foc_path", None)
+    simulation_config.pop("foc_component", None)
+
+    normalized_config["simulation"] = simulation_config
+    normalized_config["foc"] = foc_config
+    return normalized_config
+
 # We need a separate engine for the worker thread/loop
 db_engine = create_engine(settings.DATABASE_URL)
 
@@ -113,23 +197,11 @@ class TaskQueue:
                         logger.error(f"Source model file missing: {source_path}")
                         raise FileNotFoundError(f"Source model file not found at {source_path}")
 
-                simulation_config = config.get("simulation", {}) if isinstance(config, dict) else {}
-                foc_content = simulation_config.get("foc_content")
-                if foc_content:
-                    foc_dir = workspace_path / "foc"
-                    foc_dir.mkdir(parents=True, exist_ok=True)
-
-                    raw_name = simulation_config.get("foc_name") or "task_input.foc"
-                    safe_name = Path(raw_name).name or "task_input.foc"
-                    if not safe_name.lower().endswith(".foc"):
-                        safe_name = f"{safe_name}.foc"
-
-                    foc_path = foc_dir / safe_name
-                    foc_path.write_text(foc_content, encoding="utf-8")
-
-                    simulation_config["foc_path"] = str(Path("foc") / safe_name)
-                    simulation_config.pop("foc_content", None)
-                    config["simulation"] = simulation_config
+                config = _prepare_foc_config_for_workspace(
+                    config,
+                    workspace_path,
+                    source_roots=[FileManager.get_project_dir(task.project_id), Path.cwd()],
+                )
 
                 config_path = FileManager.save_config(workspace_path, config)
                 

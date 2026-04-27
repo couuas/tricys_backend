@@ -6,8 +6,7 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session
 
 from tricys_backend.utils.db import get_session
-from tricys_backend.api.deps import get_current_user
-from tricys_backend.models.user import User
+from tricys_backend.api.v2.goview.deps import GoviewTokenContext, require_goview_context
 from tricys_backend.services.file_browser_service import FileBrowserService
 from tricys_backend.api.v2.goview.data import get_user_task, get_task_workspace
 
@@ -19,12 +18,12 @@ def goview_files_model(
     task_id: str = Query(..., alias="taskId"),
     path: str = Query(...),
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
 ):
     """
     Optimized endpoint for serving 3D model files (GLTF/STL/OBJ).
     """
-    task = get_user_task(session, task_id, current_user.id)
+    task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
     workspace_path = get_task_workspace(task)
     
     try:

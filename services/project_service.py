@@ -14,12 +14,330 @@ from fastapi import HTTPException
 from tricys_backend.models.project import Project
 from tricys_backend.models.task import Task
 from tricys_backend.models.goview_project import GoviewProject
+from tricys_backend.models.project_page import ProjectPage
+from tricys_backend.models.project_page_release import ProjectPageRelease
 from tricys_backend.services.layout_service import LayoutService   
 from tricys_backend.services.file_manager import FileManager       
 
 logger = logging.getLogger(__name__)
 
 class ProjectService:
+
+    @staticmethod
+    def _slugify_page_key(value: str) -> str:
+        raw = (value or "page").strip().lower()
+        cleaned = []
+        previous_dash = False
+        for char in raw:
+            if char.isalnum():
+                cleaned.append(char)
+                previous_dash = False
+            elif not previous_dash:
+                cleaned.append("-")
+                previous_dash = True
+        page_key = "".join(cleaned).strip("-")
+        return page_key or "page"
+
+    @staticmethod
+    def list_project_pages(session: Session, project_id: str) -> List[ProjectPage]:
+        return session.exec(
+            select(ProjectPage)
+            .where(ProjectPage.project_id == project_id, ProjectPage.is_delete == 0)
+            .order_by(ProjectPage.is_default.desc(), ProjectPage.sort_order.asc(), ProjectPage.created_at.asc())
+        ).all()
+
+    @staticmethod
+    def get_project_page(session: Session, page_id: str) -> Optional[ProjectPage]:
+        page = session.get(ProjectPage, page_id)
+        if not page or page.is_delete == 1:
+            return None
+        return page
+
+    @staticmethod
+    def ensure_default_project_page(
+        session: Session,
+        project: Project,
+        user_id: Optional[str],
+        commit: bool = True
+    ) -> Optional[ProjectPage]:
+        if not user_id:
+            return None
+
+        existing = session.exec(
+            select(ProjectPage)
+            .where(
+                ProjectPage.project_id == project.id,
+                ProjectPage.is_default == True,
+                ProjectPage.is_delete == 0,
+            )
+            .order_by(ProjectPage.created_at.asc())
+        ).first()
+        if existing:
+            return existing
+
+        legacy_goview = session.get(GoviewProject, project.id)
+        if not legacy_goview:
+            ProjectService.ensure_goview_project(
+                session,
+                project_id=project.id,
+                project_name=project.name,
+                user_id=user_id,
+                commit=False,
+            )
+            legacy_goview = session.get(GoviewProject, project.id)
+
+        if not legacy_goview:
+            return None
+
+        legacy_goview.is_delete = 0
+        legacy_goview.update_time = datetime.now(timezone.utc)
+        session.add(legacy_goview)
+
+        page = ProjectPage(
+            project_id=project.id,
+            goview_project_id=legacy_goview.id,
+            page_key="overview",
+            page_name=legacy_goview.project_name or f"{project.name} Overview",
+            page_type="overview",
+            is_default=True,
+            sort_order=0,
+            visibility="public" if legacy_goview.state == 1 else "private",
+            remarks=legacy_goview.remarks or f"Default project overview page for {project.id}",
+            template_key="project-overview",
+            created_by=user_id,
+        )
+        session.add(page)
+        if commit:
+            session.commit()
+            session.refresh(page)
+        return page
+
+    @staticmethod
+    def create_project_page(
+        session: Session,
+        project: Project,
+        user_id: str,
+        page_name: str,
+        page_type: str = "custom",
+        remarks: str = "",
+        template_key: str = "",
+        is_default: bool = False,
+        content: str = "{}",
+        state: int = -1,
+        index_image: str = "",
+        page_key: Optional[str] = None,
+    ) -> ProjectPage:
+        safe_name = (page_name or "New Page").strip() or "New Page"
+        key_base = page_key or ProjectService._slugify_page_key(safe_name)
+
+        existing_keys = {
+            page.page_key
+            for page in ProjectService.list_project_pages(session, project.id)
+        }
+        resolved_key = key_base
+        suffix = 2
+        while resolved_key in existing_keys:
+            resolved_key = f"{key_base}-{suffix}"
+            suffix += 1
+
+        current_pages = ProjectService.list_project_pages(session, project.id)
+        sort_order = len(current_pages)
+
+        if is_default:
+            for existing in current_pages:
+                if existing.is_default:
+                    existing.is_default = False
+                    existing.updated_at = datetime.now(timezone.utc)
+                    session.add(existing)
+
+        goview_project = GoviewProject(
+            id=str(uuid.uuid4()),
+            project_name=safe_name,
+            content=content or "{}",
+            state=int(state),
+            index_image=index_image or "",
+            remarks=remarks or f"Tricys project page: {project.id}",
+            create_user_id=user_id,
+        )
+        session.add(goview_project)
+
+        page = ProjectPage(
+            project_id=project.id,
+            goview_project_id=goview_project.id,
+            page_key=resolved_key,
+            page_name=safe_name,
+            page_type=(page_type or "custom").strip() or "custom",
+            is_default=is_default,
+            sort_order=sort_order,
+            visibility="public" if int(state) == 1 else "private",
+            remarks=remarks or "",
+            template_key=template_key or "",
+            created_by=user_id,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        return page
+
+    @staticmethod
+    def list_project_page_releases(
+        session: Session,
+        page_id: str,
+        include_inactive: bool = False,
+    ) -> List[ProjectPageRelease]:
+        query = select(ProjectPageRelease).where(
+            ProjectPageRelease.page_id == page_id,
+            ProjectPageRelease.is_delete == 0,
+        )
+        if not include_inactive:
+            query = query.where(ProjectPageRelease.is_active == 1)
+        query = query.order_by(ProjectPageRelease.version.desc(), ProjectPageRelease.published_at.desc())
+        return list(session.exec(query).all())
+
+    @staticmethod
+    def get_project_page_release(session: Session, release_id: str) -> Optional[ProjectPageRelease]:
+        release = session.get(ProjectPageRelease, release_id)
+        if not release or release.is_delete == 1:
+            return None
+        return release
+
+    @staticmethod
+    def get_active_project_page_release(session: Session, page_id: str) -> Optional[ProjectPageRelease]:
+        return session.exec(
+            select(ProjectPageRelease)
+            .where(
+                ProjectPageRelease.page_id == page_id,
+                ProjectPageRelease.is_active == 1,
+                ProjectPageRelease.is_delete == 0,
+            )
+            .order_by(ProjectPageRelease.version.desc(), ProjectPageRelease.published_at.desc())
+        ).first()
+
+    @staticmethod
+    def _deactivate_project_page_releases(session: Session, page_id: str) -> None:
+        releases = session.exec(
+            select(ProjectPageRelease).where(
+                ProjectPageRelease.page_id == page_id,
+                ProjectPageRelease.is_delete == 0,
+                ProjectPageRelease.is_active == 1,
+            )
+        ).all()
+        for release in releases:
+            release.is_active = 0
+            session.add(release)
+
+    @staticmethod
+    def create_project_page_release(
+        session: Session,
+        page: ProjectPage,
+        goview_project: GoviewProject,
+        created_by: Optional[str],
+    ) -> ProjectPageRelease:
+        current_max = session.exec(
+            select(ProjectPageRelease)
+            .where(
+                ProjectPageRelease.page_id == page.id,
+                ProjectPageRelease.is_delete == 0,
+            )
+            .order_by(ProjectPageRelease.version.desc())
+        ).first()
+        next_version = (current_max.version if current_max else 0) + 1
+
+        ProjectService._deactivate_project_page_releases(session, page.id)
+        release = ProjectPageRelease(
+            page_id=page.id,
+            project_id=page.project_id,
+            goview_project_id=page.goview_project_id,
+            version=next_version,
+            content=goview_project.content or "{}",
+            index_image=goview_project.index_image or "",
+            remarks=page.remarks or goview_project.remarks or "",
+            created_by=created_by,
+            is_active=1,
+        )
+        session.add(release)
+        return release
+
+    @staticmethod
+    def restore_project_page_release(
+        session: Session,
+        page: ProjectPage,
+        release: ProjectPageRelease,
+    ) -> Optional[ProjectPage]:
+        goview_project = session.get(GoviewProject, page.goview_project_id)
+        if not goview_project:
+            return None
+
+        ProjectService._deactivate_project_page_releases(session, page.id)
+        release.is_active = 1
+        goview_project.content = release.content or "{}"
+        goview_project.index_image = release.index_image or goview_project.index_image or ""
+        goview_project.state = 1
+        goview_project.update_time = datetime.now(timezone.utc)
+        page.visibility = "public"
+        page.updated_at = datetime.now(timezone.utc)
+
+        session.add(release)
+        session.add(goview_project)
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        return page
+
+    @staticmethod
+    def update_project_page_publish_state(
+        session: Session,
+        page: ProjectPage,
+        published: bool,
+        created_by: Optional[str] = None,
+    ) -> Optional[ProjectPage]:
+        goview_project = session.get(GoviewProject, page.goview_project_id)
+        if not goview_project:
+            return None
+
+        if published:
+            ProjectService.create_project_page_release(
+                session,
+                page=page,
+                goview_project=goview_project,
+                created_by=created_by,
+            )
+        else:
+            ProjectService._deactivate_project_page_releases(session, page.id)
+
+        goview_project.state = 1 if published else -1
+        goview_project.update_time = datetime.now(timezone.utc)
+        page.visibility = "public" if published else "private"
+        page.updated_at = datetime.now(timezone.utc)
+        session.add(goview_project)
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        return page
+
+    @staticmethod
+    def delete_project_page(session: Session, page: ProjectPage) -> None:
+        goview_project = session.get(GoviewProject, page.goview_project_id)
+        if goview_project:
+            goview_project.is_delete = 1
+            goview_project.update_time = datetime.now(timezone.utc)
+            session.add(goview_project)
+
+        releases = session.exec(
+            select(ProjectPageRelease).where(
+                ProjectPageRelease.page_id == page.id,
+                ProjectPageRelease.is_delete == 0,
+            )
+        ).all()
+        for release in releases:
+            release.is_delete = 1
+            release.is_active = 0
+            session.add(release)
+
+        page.is_delete = 1
+        page.updated_at = datetime.now(timezone.utc)
+        session.add(page)
+        session.commit()
 
     @staticmethod
     def ensure_goview_project(
@@ -271,6 +589,29 @@ class ProjectService:
             goview_project.update_time = datetime.now(timezone.utc)
             session.add(goview_project)
 
+        page_links = session.exec(
+            select(ProjectPage).where(ProjectPage.project_id == project_id, ProjectPage.is_delete == 0)
+        ).all()
+        for page in page_links:
+            page.is_delete = 1
+            page.updated_at = datetime.now(timezone.utc)
+            session.add(page)
+            releases = session.exec(
+                select(ProjectPageRelease).where(
+                    ProjectPageRelease.page_id == page.id,
+                    ProjectPageRelease.is_delete == 0,
+                )
+            ).all()
+            for release in releases:
+                release.is_delete = 1
+                release.is_active = 0
+                session.add(release)
+            linked_goview = session.get(GoviewProject, page.goview_project_id)
+            if linked_goview:
+                linked_goview.is_delete = 1
+                linked_goview.update_time = datetime.now(timezone.utc)
+                session.add(linked_goview)
+
         session.delete(project)
         session.commit()
 
@@ -372,6 +713,40 @@ class ProjectService:
                     "remarks": goview_project.remarks,
                     "is_delete": goview_project.is_delete
                 }
+
+            pages_payload = []
+            for page in ProjectService.list_project_pages(session, project.id):
+                goview_page = session.get(GoviewProject, page.goview_project_id)
+                if not goview_page or goview_page.is_delete == 1:
+                    continue
+                pages_payload.append({
+                    "id": page.id,
+                    "goview_project_id": page.goview_project_id,
+                    "page_key": page.page_key,
+                    "page_name": page.page_name,
+                    "page_type": page.page_type,
+                    "is_default": page.is_default,
+                    "sort_order": page.sort_order,
+                    "visibility": page.visibility,
+                    "remarks": page.remarks,
+                    "template_key": page.template_key,
+                    "content": goview_page.content,
+                    "state": goview_page.state,
+                    "index_image": goview_page.index_image,
+                    "releases": [
+                        {
+                            "version": release.version,
+                            "content": release.content,
+                            "index_image": release.index_image,
+                            "remarks": release.remarks,
+                            "published_at": release.published_at.isoformat() if release.published_at else None,
+                            "is_active": release.is_active,
+                        }
+                        for release in ProjectService.list_project_page_releases(session, page.id, include_inactive=True)
+                    ],
+                })
+            if pages_payload:
+                metadata["pages"] = pages_payload
             
             with open(gather_path / "project_metadata.json", "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4)
@@ -478,21 +853,78 @@ class ProjectService:
             session.commit() # Commit project first to ensure foreign key validity
             session.refresh(project)
 
-            ProjectService.ensure_goview_project(
-                session,
-                project_id=new_project_id,
-                project_name=project.name,
-                user_id=user_id,
-                commit=True
-            )
+            imported_pages = metadata.get("pages") if isinstance(metadata.get("pages"), list) else []
+            if imported_pages:
+                for index, page_payload in enumerate(imported_pages):
+                    is_default = bool(page_payload.get("is_default"))
+                    page_name = page_payload.get("page_name") or page_payload.get("project_name") or f"Page {index + 1}"
+                    if is_default:
+                        goview_id = new_project_id
+                    else:
+                        goview_id = str(uuid.uuid4())
 
-            goview_payload = metadata.get("goview") if isinstance(metadata.get("goview"), dict) else None
-            if goview_payload:
-                ProjectService.sync_goview_payload(
+                    goview_project = GoviewProject(
+                        id=goview_id,
+                        project_name=page_name,
+                        content=page_payload.get("content") or "{}",
+                        state=int(page_payload.get("state", -1)),
+                        index_image=page_payload.get("index_image") or "",
+                        remarks=page_payload.get("remarks") or "",
+                        create_user_id=user_id,
+                    )
+                    session.add(goview_project)
+
+                    project_page = ProjectPage(
+                        project_id=new_project_id,
+                        goview_project_id=goview_id,
+                        page_key=page_payload.get("page_key") or ("overview" if is_default else ProjectService._slugify_page_key(page_name)),
+                        page_name=page_name,
+                        page_type=page_payload.get("page_type") or ("overview" if is_default else "custom"),
+                        is_default=is_default,
+                        sort_order=int(page_payload.get("sort_order", index)),
+                        visibility=page_payload.get("visibility") or ("public" if int(page_payload.get("state", -1)) == 1 else "private"),
+                        remarks=page_payload.get("remarks") or "",
+                        template_key=page_payload.get("template_key") or "",
+                        created_by=user_id,
+                    )
+                    session.add(project_page)
+                    for release_payload in page_payload.get("releases") or []:
+                        release = ProjectPageRelease(
+                            page_id=project_page.id,
+                            project_id=new_project_id,
+                            goview_project_id=goview_id,
+                            version=int(release_payload.get("version") or 1),
+                            content=release_payload.get("content") or page_payload.get("content") or "{}",
+                            index_image=release_payload.get("index_image") or page_payload.get("index_image") or "",
+                            remarks=release_payload.get("remarks") or page_payload.get("remarks") or "",
+                            created_by=user_id,
+                            published_at=datetime.fromisoformat(release_payload.get("published_at")) if release_payload.get("published_at") else datetime.now(timezone.utc),
+                            is_active=int(release_payload.get("is_active", 0)),
+                        )
+                        session.add(release)
+                session.commit()
+            else:
+                ProjectService.ensure_goview_project(
                     session,
                     project_id=new_project_id,
+                    project_name=project.name,
                     user_id=user_id,
-                    payload=goview_payload
+                    commit=True
+                )
+
+                goview_payload = metadata.get("goview") if isinstance(metadata.get("goview"), dict) else None
+                if goview_payload:
+                    ProjectService.sync_goview_payload(
+                        session,
+                        project_id=new_project_id,
+                        user_id=user_id,
+                        payload=goview_payload
+                    )
+                ProjectService.ensure_default_project_page(
+                    session,
+                    project=project,
+                    user_id=user_id,
+                    commit=True,
                 )
             
             # --- RESTORE TASKS ---
@@ -606,4 +1038,59 @@ class ProjectService:
             user_id=user_id,
             commit=True
         )
+        ProjectService.ensure_default_project_page(
+            session,
+            project=forked,
+            user_id=user_id,
+            commit=True,
+        )
+
+        source_pages = ProjectService.list_project_pages(session, project_id)
+        if source_pages:
+            default_source_ids = {page.goview_project_id for page in source_pages if page.is_default}
+            for source_page in source_pages:
+                source_goview = session.get(GoviewProject, source_page.goview_project_id)
+                if not source_goview or source_goview.is_delete == 1:
+                    continue
+                if source_page.goview_project_id in default_source_ids:
+                    target_default = session.exec(
+                        select(ProjectPage)
+                        .where(ProjectPage.project_id == new_project_id, ProjectPage.is_default == True, ProjectPage.is_delete == 0)
+                    ).first()
+                    if target_default:
+                        target_default.page_name = source_page.page_name
+                        target_default.page_type = source_page.page_type
+                        target_default.visibility = source_page.visibility
+                        target_default.remarks = source_page.remarks
+                        target_default.template_key = source_page.template_key
+                        target_default.updated_at = datetime.now(timezone.utc)
+                        session.add(target_default)
+
+                        target_goview = session.get(GoviewProject, target_default.goview_project_id)
+                        if target_goview:
+                            target_goview.project_name = source_goview.project_name
+                            target_goview.content = source_goview.content
+                            target_goview.state = source_goview.state
+                            target_goview.index_image = source_goview.index_image
+                            target_goview.remarks = source_goview.remarks
+                            target_goview.update_time = datetime.now(timezone.utc)
+                            session.add(target_goview)
+                    continue
+
+                ProjectService.create_project_page(
+                    session,
+                    project=forked,
+                    user_id=user_id,
+                    page_name=source_page.page_name,
+                    page_type=source_page.page_type,
+                    remarks=source_page.remarks or "",
+                    template_key=source_page.template_key or "",
+                    is_default=False,
+                    content=source_goview.content or "{}",
+                    state=source_goview.state,
+                    index_image=source_goview.index_image or "",
+                    page_key=source_page.page_key,
+                )
+
+            session.commit()
         return forked

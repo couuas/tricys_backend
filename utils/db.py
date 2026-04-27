@@ -6,6 +6,8 @@ from tricys_backend.models.task import Task
 from tricys_backend.models.project import Project
 from tricys_backend.models.user import User
 from tricys_backend.models.goview_project import GoviewProject
+from tricys_backend.models.project_page import ProjectPage
+from tricys_backend.models.project_page_release import ProjectPageRelease
 
 # Shared engine
 engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False})
