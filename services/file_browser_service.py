@@ -1,9 +1,18 @@
 import os
+import platform
 from pathlib import Path
 from typing import List, Dict, Any, Union
 import logging
 
 logger = logging.getLogger(__name__)
+
+def _to_extended_path(p: Path) -> Path:
+    """Converts a Path to a Windows extended path to bypass the MAX_PATH limit."""
+    if platform.system() == 'Windows':
+        s = str(p.resolve())
+        if not s.startswith('\\\\?\\'):
+            return Path('\\\\?\\' + s)
+    return p.resolve()
 
 class FileBrowserService:
     def list_files(self, root_path: Path) -> List[Dict[str, Any]]:
@@ -11,7 +20,8 @@ class FileBrowserService:
         Recursively lists files and directories in the given root path.
         Returns a tree structure.
         """
-        if not root_path.exists():
+        extended_root = _to_extended_path(root_path)
+        if not extended_root.exists():
             raise FileNotFoundError(f"Root path {root_path} does not exist")
 
         def _scan(path: Path) -> List[Dict[str, Any]]:
@@ -23,7 +33,7 @@ class FileBrowserService:
                 for entry in entries:
                     item = {
                         "name": entry.name,
-                        "path": entry.relative_to(root_path).as_posix(),
+                        "path": entry.relative_to(extended_root).as_posix(),
                         "type": "directory" if entry.is_dir() else "file",
                     }
                     
@@ -33,11 +43,11 @@ class FileBrowserService:
                         item["size"] = entry.stat().st_size
                         
                     items.append(item)
-            except PermissionError:
-                pass # Skip folders we can't read
+            except (PermissionError, FileNotFoundError, OSError) as e:
+                logger.warning(f"Skipped reading path due to error: {e}")
             return items
 
-        return _scan(root_path)
+        return _scan(extended_root)
 
     def get_file_path(self, root_path: Path, relative_path: str) -> Path:
         """
@@ -47,10 +57,11 @@ class FileBrowserService:
         if ".." in relative_path or relative_path.startswith("/"):
              raise ValueError(f"Invalid path: {relative_path}")
              
-        full_path = (root_path / relative_path).resolve()
+        full_path = _to_extended_path(root_path / relative_path)
+        extended_root = _to_extended_path(root_path)
         
         # Ensure it's still inside root_path (prevent symlink attacks or traversal)
-        if not str(full_path).startswith(str(root_path.resolve())):
+        if not str(full_path).startswith(str(extended_root)):
              raise ValueError("Access denied: Path is outside workspace")
              
         if not full_path.exists():

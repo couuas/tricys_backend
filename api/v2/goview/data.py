@@ -368,3 +368,236 @@ def goview_analysis_report(
         return success({"content": f"# Error reading report\n{str(exc)}"})
 
     return success({"content": "# Report not generated yet."})
+
+
+# --- New Planned Endpoints for GoView HDF5 Integration ---
+
+class GoviewTimeseriesRequest(BaseModel):
+    variables: List[str]
+    job_ids: Optional[List[int]] = None
+    limit: Optional[int] = 500
+    time_range: Optional[List[float]] = None
+
+class GoviewMetricsRequest(BaseModel):
+    metrics: List[str]
+    job_id: int
+
+@router.get("/{task_id}/metadata")
+def get_goview_metadata(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        workspace_path = get_task_workspace(task)
+        meta = hdf5_service.get_visualizer_metadata(task_id, workspace_path)
+        
+        variables = meta.get("variable_options", [])
+        metrics_list = meta.get("parameter_options", [])
+        
+        # Format jobs
+        jobs_raw = meta.get("jobs_data", [])
+        jobs = []
+        for j in jobs_raw:
+            job_dict = {"job_id": j.get("job_id", 0), "status": "COMPLETED"}
+            for k, v in j.items():
+                if k != "job_id":
+                    job_dict[k] = v
+            jobs.append(job_dict)
+
+        return success({
+            "variables": variables,
+            "jobs": jobs,
+            "metrics": metrics_list
+        })
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+    except Exception as e:
+        return error(500, str(e))
+
+
+@router.post("/{task_id}/timeseries")
+def query_goview_timeseries(
+    task_id: str,
+    payload: GoviewTimeseriesRequest,
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        workspace_path = get_task_workspace(task)
+
+        time_range: Optional[Tuple[float, float]] = None
+        if payload.time_range and len(payload.time_range) == 2:
+            time_range = (payload.time_range[0], payload.time_range[1])
+
+        data = hdf5_service.query_results(
+            task_id=task_id,
+            workspace_path=workspace_path,
+            variables=payload.variables,
+            time_range=time_range,
+            job_ids=payload.job_ids,
+            limit=payload.limit
+        )
+
+        # Format to ECharts Dataset format
+        # data = {"time": [...], "temperature": [...]}
+        times = data.get("time", [])
+        dimensions = ["time"] + payload.variables
+        source = []
+        
+        if times:
+            for i in range(len(times)):
+                row = [times[i]]
+                for var in payload.variables:
+                    var_arr = data.get(var, [])
+                    row.append(var_arr[i] if i < len(var_arr) else None)
+                source.append(row)
+
+        return success({
+            "dimensions": dimensions,
+            "source": source
+        })
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+    except Exception as e:
+        return error(500, str(e))
+
+
+@router.post("/{task_id}/metrics")
+def query_goview_metrics(
+    task_id: str,
+    payload: GoviewMetricsRequest,
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        workspace_path = get_task_workspace(task)
+
+        metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
+        
+        # Filter for the requested job_id
+        filtered_metrics = [m for m in metrics if m.get("job_id") == payload.job_id]
+        
+        result = []
+        for m_name in payload.metrics:
+            # Find the metric
+            found = False
+            for m in filtered_metrics:
+                name = m.get("metric_name") or m.get("name") or m.get("metric")
+                if name == m_name:
+                    val = m.get("metric_value") if "metric_value" in m else m.get("value")
+                    result.append({"name": m_name, "value": val})
+                    found = True
+                    break
+            if not found:
+                result.append({"name": m_name, "value": None})
+
+        return success(result)
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+    except Exception as e:
+        return error(500, str(e))
+
+
+@router.post("/{task_id}/table")
+def query_goview_table(
+    task_id: str,
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        workspace_path = get_task_workspace(task)
+
+        meta = hdf5_service.get_visualizer_metadata(task_id, workspace_path)
+        jobs_data = meta.get("jobs_data", [])
+        
+        metrics = hdf5_service.get_summary_metrics(task_id, workspace_path)
+        
+        # Join jobs_data with metrics
+        # jobs_data: [{"job_id": 1, "param_a": 10}, ...]
+        # metrics: [{"job_id": 1, "metric_name": "max_temp", "metric_value": 315.2}, ...]
+        
+        job_metrics_map = {}
+        for m in metrics:
+            jid = m.get("job_id")
+            name = m.get("metric_name") or m.get("name") or m.get("metric")
+            val = m.get("metric_value") if "metric_value" in m else m.get("value")
+            if jid is not None and name:
+                if jid not in job_metrics_map:
+                    job_metrics_map[jid] = {}
+                job_metrics_map[jid][name] = val
+                
+        result_table = []
+        for job in jobs_data:
+            jid = job.get("job_id")
+            row = dict(job)
+            if jid in job_metrics_map:
+                row.update(job_metrics_map[jid])
+            result_table.append(row)
+
+        return success(result_table)
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+    except Exception as e:
+        return error(500, str(e))
+
+class GoviewLatestValuesRequest(BaseModel):
+    variables: List[str]
+    job_id: Optional[int] = None
+
+@router.post("/{task_id}/latest_values")
+def query_goview_latest_values(
+    task_id: str,
+    payload: GoviewLatestValuesRequest,
+    session: Session = Depends(get_session),
+    current_ctx: GoviewTokenContext = Depends(require_goview_context)
+):
+    try:
+        task = get_user_task(session, task_id, current_ctx.user.id, current_ctx.tricys_project_id)
+        workspace_path = get_task_workspace(task)
+
+        hdf5_file = hdf5_service.resolve_hdf5_file(task_id, workspace_path)
+        if not hdf5_file or not hdf5_file.exists():
+            return success({"dimensions": ["variable", "value"], "source": []})
+
+        import pandas as pd
+        import numpy as np
+        where_str = None
+        if payload.job_id is not None:
+             where_str = f"job_id == {payload.job_id}"
+             
+        cols = list(set(payload.variables + ["time"])) if payload.variables else None
+
+        with pd.HDFStore(hdf5_file, mode='r') as store:
+            if '/results' not in store:
+                return success({"dimensions": ["variable", "value"], "source": []})
+            
+            df = store.select('results', where=where_str, columns=cols)
+            
+        if df.empty:
+            return success({"dimensions": ["variable", "value"], "source": []})
+            
+        last_row = df.iloc[-1]
+        
+        dimensions = ["variable", "value"]
+        source = []
+        for var in payload.variables:
+            val = last_row.get(var)
+            if pd.isna(val):
+                val = None
+            elif isinstance(val, (np.integer, np.floating)):
+                val = val.item()
+            source.append([var, val])
+
+        return success({
+            "dimensions": dimensions,
+            "source": source
+        })
+    except HTTPException as e:
+        return error(e.status_code, e.detail)
+    except Exception as e:
+        return error(500, str(e))

@@ -198,14 +198,26 @@ class LayoutService:
                 merged_entry['defaultValue'] = existing_entry.get('defaultValue', merged_entry.get('defaultValue'))
             data['parameters'][existing_index] = merged_entry
 
-        # --- 1. Locate Cycle Model Block (Main System) ---
-        # Match model Cycle ... end Cycle;
-        cycle_block_pattern = re.compile(r"((?:within\s+[^;]+;\s*)?model\s+Cycle(.*?)end\s+Cycle;)", re.DOTALL | re.IGNORECASE)
-        match_block = cycle_block_pattern.search(content)
+        # --- 1. Locate Main Model Block ---
+        package_match = re.search(r"\bpackage\s+([A-Za-z_]\w*)", content)
+        package_name = package_match.group(1) if package_match else None
+
+        model_match = re.search(r"\bmodel\s+([A-Za-z_]\w*)", content)
+        if model_match:
+            main_model_name = model_match.group(1)
+            full_model_name = f"{package_name}.{main_model_name}" if package_name else main_model_name
+            data["model_name"] = full_model_name
+            cycle_block_pattern = re.compile(rf"((?:within\s+[^;]+;\s*)?model\s+{re.escape(main_model_name)}(.*?)end\s+{re.escape(main_model_name)};)", re.DOTALL | re.IGNORECASE)
+            match_block = cycle_block_pattern.search(content)
+        else:
+            main_model_name = "Cycle"
+            data["model_name"] = "example_model.Cycle"
+            cycle_block_pattern = re.compile(r"((?:within\s+[^;]+;\s*)?model\s+Cycle(.*?)end\s+Cycle;)", re.DOTALL | re.IGNORECASE)
+            match_block = cycle_block_pattern.search(content)
         
         cycle_full_code = match_block.group(1).strip() if match_block else content.strip()
         cycle_content = match_block.group(2) if match_block else content
-        data["source_codes"]["Cycle"] = cycle_full_code
+        data["source_codes"][main_model_name] = cycle_full_code
 
         # Map: Type -> Instance Names (e.g. "Plasma" -> ["plasma"])
         type_instance_map: Dict[str, List[str]] = {}
