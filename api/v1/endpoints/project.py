@@ -42,14 +42,18 @@ def refresh_project_structure_if_needed(project: Project, session: Session) -> P
 
     needs_refresh = not project.defaults_json or not parameters or not source_codes
 
+    main_model_name = structure.get("model_name", "").split(".")[-1]
+    if not main_model_name:
+        main_model_name = "Cycle"
+
     if not needs_refresh and components:
         component_ids = {component.get("id") for component in components if component.get("id")}
-        if "Cycle" not in source_codes or not component_ids.issubset(set(source_codes.keys())):
+        if main_model_name not in source_codes or not component_ids.issubset(set(source_codes.keys())):
             needs_refresh = True
 
     if not needs_refresh:
         for component_id, source_code in source_codes.items():
-            if component_id == "Cycle" or not isinstance(source_code, str):
+            if component_id == main_model_name or not isinstance(source_code, str):
                 continue
             stripped_source = source_code.strip()
             if stripped_source.startswith(("model ", "block ")):

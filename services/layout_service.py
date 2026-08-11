@@ -202,9 +202,9 @@ class LayoutService:
         package_match = re.search(r"\bpackage\s+([A-Za-z_]\w*)", content)
         package_name = package_match.group(1) if package_match else None
 
-        model_match = re.search(r"\bmodel\s+([A-Za-z_]\w*)", content)
-        if model_match:
-            main_model_name = model_match.group(1)
+        model_matches = re.findall(r"\bmodel\s+([A-Za-z_]\w*)", content)
+        if model_matches:
+            main_model_name = model_matches[-1]
             full_model_name = f"{package_name}.{main_model_name}" if package_name else main_model_name
             data["model_name"] = full_model_name
             cycle_block_pattern = re.compile(rf"((?:within\s+[^;]+;\s*)?model\s+{re.escape(main_model_name)}(.*?)end\s+{re.escape(main_model_name)};)", re.DOTALL | re.IGNORECASE)
