@@ -18,6 +18,7 @@ from tricys_backend.models.project_page import ProjectPage
 from tricys_backend.models.project_page_release import ProjectPageRelease
 from tricys_backend.services.layout_service import LayoutService   
 from tricys_backend.services.file_manager import FileManager       
+from tricys_backend.services.schema_service import SchemaService
 
 logger = logging.getLogger(__name__)
 
@@ -464,11 +465,35 @@ class ProjectService:
             with open(model_path, 'w', encoding='utf-8') as f:     
                 f.write(file_content)
 
-            # 3. Parse Structure
-            structure_data = LayoutService.parse_model_structure(file_content)
+            # 3. Dynamically Extract Schema using OMPython
+            import re
+            schema_data = None
+            try:
+                # 3.1 Try to find the package name
+                package_match = re.search(r"\bpackage\s+([A-Za-z_]\w*)", file_content)
+                if package_match:
+                    package_name = package_match.group(1)
+                else:
+                    # Fallback to main model name
+                    model_matches = re.findall(r"\bmodel\s+([A-Za-z_]\w*)", file_content)
+                    package_name = model_matches[-1] if model_matches else "Cycle"
+                
+                # 3.2 Extract schema via OMC
+                schema_data = SchemaService.extract_schema(str(model_path), package_name)
+                
+                # 3.3 Save schema.json to project directory for persistence
+                if schema_data:
+                    schema_path = project_dir / "schema.json"
+                    with open(schema_path, "w", encoding="utf-8") as sf:
+                        json.dump(schema_data, sf, indent=4, ensure_ascii=False)
+            except Exception as e:
+                logger.error(f"Failed to extract schema dynamically: {e}")
+
+            # 4. Parse Structure using the extracted schema
+            structure_data = LayoutService.parse_model_structure(file_content, schema_data)
             extracted_params = structure_data.get("parameters", {})
 
-            # 4. Create DB Entry
+            # 5. Create DB Entry
             project = Project(
                 id=project_id,
                 user_id=user_id,

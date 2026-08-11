@@ -74,6 +74,15 @@ def refresh_project_structure_if_needed(project: Project, session: Session) -> P
     with open(project.model_file_path, "r", encoding="utf-8") as model_file:
         refreshed_struct = LayoutService.parse_model_structure(model_file.read())
 
+    old_struct = project.structure_json or {}
+    old_components = {c.get("id", "").lower(): c for c in old_struct.get("components", []) if c.get("id")}
+    for rc in refreshed_struct.get("components", []):
+        rid = rc.get("id", "").lower()
+        if rid in old_components:
+            oc = old_components[rid]
+            if not rc.get("has_layout") and "position" in oc:
+                rc["position"] = oc["position"]
+
     extracted_params = refreshed_struct.get("parameters", [])
     project.structure_json = refreshed_struct
     project.defaults_json = extracted_params

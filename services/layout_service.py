@@ -11,7 +11,7 @@ class LayoutService:
     """
 
     @staticmethod
-    def parse_model_structure(content: str) -> Dict[str, Any]:
+    def parse_model_structure(content: str, schema_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Parses Modelica code content to extract:
         1. Components with layout coordinates (annotation(origin=...))
@@ -311,6 +311,45 @@ class LayoutService:
         # --- 4. Parse Sub-model Parameters & Source ---
         model_def_pattern = re.compile(r"((?:model|block)\s+([A-Za-z_][\w]*)(.*?)end\s+\2;)", re.DOTALL)
         
+        processed_types = set()
+
+        if schema_data:
+            for model_type, instances in type_instance_map.items():
+                if model_type in schema_data:
+                    schema_cls = schema_data[model_type]
+                    processed_types.add(model_type)
+                    for instance_name in instances:
+                        if "parameters" in schema_cls:
+                            for p_name, p_info in schema_cls["parameters"].items():
+                                val_str = p_info.get("value")
+                                raw_val = str(val_str) if val_str is not None else ""
+                                val = parse_modelica_value(raw_val)
+
+                                key = f"{instance_name}.{p_name}"
+                                dims = p_info.get("dimension")
+                                dims_str = f"({','.join(dims)})" if dims else format_dimensions(val)
+
+                                base_entry = {
+                                    "name": key,
+                                    "type": p_info.get("type", "Unknown"),
+                                    "value": val,
+                                    "defaultValue": val,
+                                    "comment": p_info.get("description", ""),
+                                    "dimensions": dims_str
+                                }
+
+                                override_entry = instance_parameter_overrides.get(instance_name, {}).get(p_name)
+                                if override_entry:
+                                    merged_entry = {
+                                        **base_entry,
+                                        "value": override_entry.get("value", val),
+                                        "defaultValue": override_entry.get("defaultValue", val),
+                                        "dimensions": override_entry.get("dimensions") or base_entry["dimensions"],
+                                    }
+                                    upsert_parameter_entry(merged_entry, preserve_existing_value=False)
+                                else:
+                                    upsert_parameter_entry(base_entry, preserve_existing_value=False)
+
         for match in model_def_pattern.finditer(content):
             full_code = match.group(1)
             model_type = match.group(2)
@@ -319,6 +358,9 @@ class LayoutService:
             if model_type in type_instance_map:
                 for instance_name in type_instance_map[model_type]:
                     data["source_codes"][instance_name] = full_code.strip()
+
+                    if model_type in processed_types:
+                        continue
 
                     param_pattern = re.compile(
                         r"parameter\s+([A-Za-z_][\w\.]*)\s+"
@@ -359,5 +401,26 @@ class LayoutService:
                         else:
                             upsert_parameter_entry(base_entry, preserve_existing_value=False)
 
+        # --- 5. Filter out isolated components ---
+        connected_comp_ids = set()
+        for conn in data["connections"]:
+            connected_comp_ids.add(conn["from"])
+            connected_comp_ids.add(conn["to"])
+
+        original_comp_count = len(data["components"])
+        
+        # Only keep components that are in connected_comp_ids
+        data["components"] = [
+            comp for comp in data["components"]
+            if comp["id"] in connected_comp_ids
+        ]
+        
+        # Filter parameters associated with isolated components
+        data["parameters"] = [
+            p for p in data["parameters"]
+            if p["name"].split('.')[0] in connected_comp_ids
+        ]
+        
+        logger.info(f"Filtered out {original_comp_count - len(data['components'])} isolated components")
         logger.info(f"Parsed structure: {len(data['components'])} components, {len(data['connections'])} connections")
         return data
