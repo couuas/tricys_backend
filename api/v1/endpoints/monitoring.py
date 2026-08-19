@@ -11,6 +11,7 @@ from tricys_backend.models.project import Project
 from tricys_backend.models.user import User
 from tricys_backend.api.deps import get_current_user
 from tricys_backend.services.task_queue import TaskQueue
+from tricys_backend.services.connection_manager import manager
 from tricys_backend.services.file_manager import FileManager
 
 router = APIRouter()
@@ -142,7 +143,7 @@ def read_task(
     return get_user_task(session, task_id, current_user.id, allow_public=True)
 
 @router.post("/tasks/{task_id}/stop")
-def stop_task(
+async def stop_task(
     task_id: str, 
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
@@ -156,21 +157,31 @@ def stop_task(
     try:
         if task.status == "RUNNING" and task.pid:
             success = TaskQueue.stop_task(task.pid)
-            if success:
-                task.status = "STOPPED"
-                task.updated_at = datetime.now(timezone.utc)
-                session.add(task)
-                session.commit()
-                return {"message": "Task stopped successfully", "task_id": task_id}
-            else:
-                raise HTTPException(status_code=500, detail="Failed to stop process")
-                
-        elif task.status == "PENDING":
             task.status = "STOPPED"
             task.updated_at = datetime.now(timezone.utc)
             session.add(task)
             session.commit()
-            return {"message": "Task marked as stopped (was pending)", "task_id": task_id}
+            
+            try:
+                await manager.broadcast_to_task(task_id, {"type": "status", "status": "STOPPED"})
+            except Exception as b_err:
+                logger.warning(f"Broadcast stop status failed: {b_err}")
+            
+            if not success:
+                logger.warning(f"Process for task {task_id} could not be stopped cleanly or already terminated")
+            return {"message": "Task stopped successfully", "task_id": task_id}
+                
+        elif task.status in ["PENDING", "RUNNING"]:
+            task.status = "STOPPED"
+            task.updated_at = datetime.now(timezone.utc)
+            session.add(task)
+            session.commit()
+            
+            try:
+                await manager.broadcast_to_task(task_id, {"type": "status", "status": "STOPPED"})
+            except Exception as b_err:
+                logger.warning(f"Broadcast stop status failed: {b_err}")
+            return {"message": "Task marked as stopped", "task_id": task_id}
         
         return {"message": "Task not running", "task_id": task_id}
     except Exception as e:

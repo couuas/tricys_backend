@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     )
     
     TRICYS_CMD: str = "tricys"  # or "python -m tricys"
+    MAX_CONCURRENT_TASKS: int = int(os.getenv("MAX_CONCURRENT_TASKS", "4"))
     
     # CORS Configuration - can be overridden via environment variable
     # Including '*' for development, but note that main.py needs to handle this 

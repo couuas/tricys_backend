@@ -23,6 +23,7 @@ class LayoutService:
             "components": [],
             "connections": [],
             "parameters": [],
+            "variables": [],
             "source_codes": {}
         }
 
@@ -198,6 +199,15 @@ class LayoutService:
                 merged_entry['defaultValue'] = existing_entry.get('defaultValue', merged_entry.get('defaultValue'))
             data['parameters'][existing_index] = merged_entry
 
+        def upsert_variable_entry(entry: Dict[str, Any]) -> None:
+            existing_index = next((index for index, item in enumerate(data['variables']) if item.get('name') == entry.get('name')), None)
+            if existing_index is None:
+                data['variables'].append(entry)
+            else:
+                data['variables'][existing_index] = {**data['variables'][existing_index], **entry}
+
+        component_variables_map: Dict[str, List[str]] = {}
+
         # --- 1. Locate Main Model Block ---
         package_match = re.search(r"\bpackage\s+([A-Za-z_]\w*)", content)
         package_name = package_match.group(1) if package_match else None
@@ -278,7 +288,8 @@ class LayoutService:
                 "id": comp_name,
                 "type": comp_type,
                 "position": {"x": x, "y": y},
-                "has_layout": bool(origin_match)
+                "has_layout": bool(origin_match),
+                "variables": []
             })
 
             type_instance_map.setdefault(comp_type, []).append(comp_name)
@@ -308,7 +319,39 @@ class LayoutService:
                 "raw_to": target_full
             })
 
-        # --- 4. Parse Sub-model Parameters & Source ---
+        def expand_variable_names(v_name: str, dimensions: Any) -> List[str]:
+            """
+            If a variable is an array (e.g. dimensions is [1], [5], ["3"], [N_is], etc.),
+            expand it into concrete element names like 'I[1]', 'I[2]', etc.
+            If scalar or dimension is empty, return [v_name].
+            """
+            if not dimensions:
+                return [v_name]
+            
+            dim_count = None
+            if isinstance(dimensions, list):
+                if len(dimensions) > 0:
+                    first = str(dimensions[0]).strip()
+                    try:
+                        dim_count = int(first)
+                    except Exception:
+                        dim_count = 1  # symbolic like N_is -> default to index [1]
+            elif isinstance(dimensions, str):
+                cleaned = dimensions.strip("[]() ")
+                if cleaned:
+                    parts = cleaned.split(",")
+                    try:
+                        dim_count = int(parts[0].strip())
+                    except Exception:
+                        dim_count = 1  # symbolic -> default to index [1]
+            
+            if dim_count is not None and dim_count > 0:
+                max_expand = min(dim_count, 20)
+                return [f"{v_name}[{i}]" for i in range(1, max_expand + 1)]
+            
+            return [v_name]
+
+        # --- 4. Parse Sub-model Parameters, Variables & Source ---
         model_def_pattern = re.compile(r"((?:model|block)\s+([A-Za-z_][\w]*)(.*?)end\s+\2;)", re.DOTALL)
         
         processed_types = set()
@@ -319,6 +362,7 @@ class LayoutService:
                     schema_cls = schema_data[model_type]
                     processed_types.add(model_type)
                     for instance_name in instances:
+                        # Parameters
                         if "parameters" in schema_cls:
                             for p_name, p_info in schema_cls["parameters"].items():
                                 val_str = p_info.get("value")
@@ -349,6 +393,41 @@ class LayoutService:
                                     upsert_parameter_entry(merged_entry, preserve_existing_value=False)
                                 else:
                                     upsert_parameter_entry(base_entry, preserve_existing_value=False)
+                        
+                        # Variables
+                        if "variables" in schema_cls:
+                            for v_name, v_info in schema_cls["variables"].items():
+                                dims = v_info.get("dimension")
+                                dims_str = f"({','.join(dims)})" if dims else ""
+                                expanded_names = expand_variable_names(v_name, dims)
+                                for exp_name in expanded_names:
+                                    key = f"{instance_name}.{exp_name}"
+                                    var_entry = {
+                                        "name": key,
+                                        "shortName": exp_name,
+                                        "baseName": v_name,
+                                        "type": v_info.get("type", "Real"),
+                                        "comment": v_info.get("description", ""),
+                                        "dimensions": dims_str
+                                    }
+                                    upsert_variable_entry(var_entry)
+                                    if exp_name not in component_variables_map.setdefault(instance_name, []):
+                                        component_variables_map[instance_name].append(exp_name)
+                        
+                        # Connectors / Outputs
+                        if "connectors" in schema_cls:
+                            for c_name, c_info in schema_cls["connectors"].items():
+                                key = f"{instance_name}.{c_name}"
+                                conn_entry = {
+                                    "name": key,
+                                    "shortName": c_name,
+                                    "type": c_info.get("type", "Connector"),
+                                    "comment": c_info.get("description", ""),
+                                    "isConnector": True
+                                }
+                                upsert_variable_entry(conn_entry)
+                                if c_name not in component_variables_map.setdefault(instance_name, []):
+                                    component_variables_map[instance_name].append(c_name)
 
         for match in model_def_pattern.finditer(content):
             full_code = match.group(1)
@@ -362,6 +441,7 @@ class LayoutService:
                     if model_type in processed_types:
                         continue
 
+                    # Sub-model parameters
                     param_pattern = re.compile(
                         r"parameter\s+([A-Za-z_][\w\.]*)\s+"
                         r"([a-zA-Z0-9_]+)"
@@ -401,7 +481,47 @@ class LayoutService:
                         else:
                             upsert_parameter_entry(base_entry, preserve_existing_value=False)
 
-        # --- 5. Filter out isolated components ---
+                    # Sub-model variables (excluding parameter/constant/keywords)
+                    # Pattern matches variable declarations such as: Real inventory(unit="g", ...); flow Real mdot_HT; Real I[5];
+                    body_declarations = re.split(
+                        r"\b(?:equation|algorithm|initial\s+equation|initial\s+algorithm)\b",
+                        model_body,
+                        maxsplit=1,
+                        flags=re.IGNORECASE,
+                    )[0]
+
+                    var_decl_pattern = re.compile(
+                        r"^\s*(?:flow\s+)?(?:input\s+|output\s+)?([A-Za-z_][\w\.]*)\s+([a-zA-Z0-9_]+)(\s*\[[^\]]+\])?(?:\s*\([^)]*\))?(?:\s*=\s*[^;]*)?(?:\s*\"([^\"]*)\")?\s*;",
+                        re.MULTILINE
+                    )
+
+                    var_keywords = {"parameter", "constant", "import", "extends", "replaceable", "final", "annotation"}
+
+                    for v_match in var_decl_pattern.finditer(body_declarations):
+                        v_type = v_match.group(1).strip()
+                        v_name = v_match.group(2).strip()
+                        v_dims = v_match.group(3) or ''
+                        v_comment = v_match.group(4) or ''
+
+                        if v_type.lower() in var_keywords or v_name.lower() in var_keywords:
+                            continue
+
+                        expanded_names = expand_variable_names(v_name, v_dims)
+                        for exp_name in expanded_names:
+                            key = f"{instance_name}.{exp_name}"
+                            var_entry = {
+                                "name": key,
+                                "shortName": exp_name,
+                                "baseName": v_name,
+                                "type": v_type,
+                                "comment": v_comment.strip(),
+                                "dimensions": v_dims.strip()
+                            }
+                            upsert_variable_entry(var_entry)
+                            if exp_name not in component_variables_map.setdefault(instance_name, []):
+                                component_variables_map[instance_name].append(exp_name)
+
+        # --- 5. Filter out isolated components & attach variables ---
         connected_comp_ids = set()
         for conn in data["connections"]:
             connected_comp_ids.add(conn["from"])
@@ -409,18 +529,26 @@ class LayoutService:
 
         original_comp_count = len(data["components"])
         
-        # Only keep components that are in connected_comp_ids
-        data["components"] = [
-            comp for comp in data["components"]
-            if comp["id"] in connected_comp_ids
-        ]
+        # Only keep components that are in connected_comp_ids and attach their variables
+        filtered_components = []
+        for comp in data["components"]:
+            if comp["id"] in connected_comp_ids:
+                comp["variables"] = component_variables_map.get(comp["id"], [])
+                filtered_components.append(comp)
+        data["components"] = filtered_components
         
         # Filter parameters associated with isolated components
         data["parameters"] = [
             p for p in data["parameters"]
             if p["name"].split('.')[0] in connected_comp_ids
         ]
+
+        # Filter variables associated with isolated components
+        data["variables"] = [
+            v for v in data["variables"]
+            if v["name"].split('.')[0] in connected_comp_ids
+        ]
         
         logger.info(f"Filtered out {original_comp_count - len(data['components'])} isolated components")
-        logger.info(f"Parsed structure: {len(data['components'])} components, {len(data['connections'])} connections")
+        logger.info(f"Parsed structure: {len(data['components'])} components, {len(data['connections'])} connections, {len(data['variables'])} variables")
         return data

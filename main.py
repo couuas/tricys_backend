@@ -65,9 +65,14 @@ async def recover_tasks():
                  except Exception:
                      pass
             
-            # Always mark as FAILED because the LogReader and Waiter threads are lost
-            task.status = "FAILED"
-            task.error_msg = "Task interrupted by server restart"
+            # Check if workspace has completed results
+            from pathlib import Path
+            if task.workspace_path and (Path(task.workspace_path) / "sweep_results.h5").exists():
+                task.status = "COMPLETED"
+                task.result_path = str(Path(task.workspace_path) / "sweep_results.h5")
+            else:
+                task.status = "FAILED"
+                task.error_msg = "Task interrupted by server restart"
             task.pid = None
             session.add(task)
             recovered_count += 1
@@ -114,8 +119,8 @@ async def lifespan(app: FastAPI):
     # Recover tasks
     await recover_tasks()
     
-    # Start TaskQueue worker in background
-    worker_task = asyncio.create_task(TaskQueue.worker())
+    # Start TaskQueue workers in background
+    worker_tasks = TaskQueue.start_workers()
     
     # Start Cleanup Service
     from tricys_backend.services.cleanup_service import run_cleanup_loop
@@ -124,11 +129,11 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    worker_task.cancel()
+    for worker_task in worker_tasks:
+        worker_task.cancel()
     cleanup_task.cancel()
     try:
-        await worker_task
-        await cleanup_task
+        await asyncio.gather(*worker_tasks, cleanup_task, return_exceptions=True)
     except asyncio.CancelledError:
         pass
 

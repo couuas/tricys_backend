@@ -108,6 +108,11 @@ class TaskQueue:
     _engine_service = SimulationEngine()
     
     @classmethod
+    def stop_task(cls, pid: int) -> bool:
+        """Stops the process with the given PID via SimulationEngine."""
+        return cls._engine_service.stop_task(pid)
+
+    @classmethod
     async def add_task(cls, task_id: str):
         await cls._queue.put(task_id)
         logger.info(f"Task {task_id} added to queue")
@@ -115,11 +120,11 @@ class TaskQueue:
         await manager.broadcast_to_task(task_id, {"type": "status", "status": "PENDING"})
 
     @classmethod
-    async def worker(cls):
-        logger.info("TaskQueue worker started")
+    async def worker(cls, worker_id: int = 1):
+        logger.info(f"TaskQueue worker {worker_id} started")
         while True:
             task_id = await cls._queue.get()
-            logger.info(f"Processing task {task_id}")
+            logger.info(f"Worker {worker_id} processing task {task_id}")
             
             try:
                 await cls._process_task(task_id)
@@ -127,6 +132,16 @@ class TaskQueue:
                 logger.error(f"Error processing task {task_id}: {e}")
             finally:
                 cls._queue.task_done()
+
+    @classmethod
+    def start_workers(cls, count: int = None) -> list[asyncio.Task]:
+        """Starts multiple concurrent worker coroutines."""
+        num_workers = count or getattr(settings, "MAX_CONCURRENT_TASKS", 4)
+        workers = []
+        for i in range(1, num_workers + 1):
+            workers.append(asyncio.create_task(cls.worker(worker_id=i)))
+        logger.info(f"Started {len(workers)} concurrent TaskQueue workers")
+        return workers
 
     @classmethod
     async def _process_task(cls, task_id: str):
@@ -238,11 +253,13 @@ class TaskQueue:
                 # 4. Wait for completion
                 try:
                     p = psutil.Process(pid)
-                    # Poll while process is running to stream logs?
-                    # For MVP, we wait.
                     exit_code = await asyncio.to_thread(p.wait)
                     
-                    if exit_code == 0:
+                    session.refresh(task)
+                    if task.status == "STOPPED":
+                        logger.info(f"Task {task_id} process finished after being stopped.")
+                        await manager.broadcast_to_task(task_id, {"type": "status", "status": "STOPPED"})
+                    elif exit_code == 0:
                         task.status = "COMPLETED"
                         # Standard sweep results name
                         task.result_path = str(workspace_path / "sweep_results.h5") 
@@ -253,18 +270,22 @@ class TaskQueue:
                         await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": f"Exit code {exit_code}"})
                         
                 except psutil.NoSuchProcess:
-                    task.status = "FAILED"
-                    task.error_msg = "Process disappeared unexpectedly"
-                    await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": "Process disappeared"})
+                    session.refresh(task)
+                    if task.status != "STOPPED":
+                        task.status = "FAILED"
+                        task.error_msg = "Process disappeared unexpectedly"
+                        await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": "Process disappeared"})
                     
             except Exception as e:
-                task.status = "FAILED"
-                task.error_msg = str(e)
-                await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": str(e)})
+                session.refresh(task)
+                if task.status != "STOPPED":
+                    task.status = "FAILED"
+                    task.error_msg = str(e)
+                    await manager.broadcast_to_task(task_id, {"type": "status", "status": "FAILED", "error": str(e)})
             finally:
                 task.updated_at = datetime.now(timezone.utc)
-                if task.pid:
-                    cls._engine_service.cleanup_process(task.pid)
+                if pid:
+                    cls._engine_service.cleanup_process(pid)
                 task.pid = None
                 session.add(task)
                 session.commit()
