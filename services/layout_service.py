@@ -11,6 +11,58 @@ class LayoutService:
     """
 
     @staticmethod
+    def find_main_model_name(content: str) -> str:
+        """
+        Determines the main/top-level system model name from Modelica content.
+        Strategy:
+        1. Model with the most connect(...) statements (typical top-level assembly).
+        2. Exact keyword match for primary model names ('cycle', 'system', 'plant', 'main', 'top').
+        3. Substring match for priority keywords.
+        4. Model with the most annotation(...) blocks or subcomponent declarations.
+        5. Fallback to the last declared model or 'Cycle'.
+        """
+        model_matches = re.findall(r"\bmodel\s+([A-Za-z_]\w*)", content)
+        if not model_matches:
+            return "Cycle"
+
+        best_connect_model = None
+        max_connects = -1
+        model_stats = {}
+
+        for m in model_matches:
+            pat = re.compile(rf"\bmodel\s+{re.escape(m)}\b(.*?)end\s+{re.escape(m)};", re.DOTALL | re.IGNORECASE)
+            mat = pat.search(content)
+            if mat:
+                body = mat.group(1)
+                connect_count = len(re.findall(r"\bconnect\s*\(", body))
+                annot_count = len(re.findall(r"\bannotation\s*\(", body))
+                model_stats[m] = {"connects": connect_count, "annots": annot_count}
+                if connect_count > max_connects:
+                    max_connects = connect_count
+                    best_connect_model = m
+
+        if best_connect_model and max_connects > 0:
+            return best_connect_model
+
+        priority_keywords = ["cycle", "system", "plant", "main", "top"]
+        for kw in priority_keywords:
+            for m in model_matches:
+                if m.lower() == kw:
+                    return m
+
+        for kw in priority_keywords:
+            for m in model_matches:
+                if kw in m.lower():
+                    return m
+
+        if model_stats:
+            best_annot_model = max(model_stats.keys(), key=lambda k: model_stats[k]["annots"])
+            if model_stats[best_annot_model]["annots"] > 0:
+                return best_annot_model
+
+        return model_matches[-1]
+
+    @staticmethod
     def parse_model_structure(content: str, schema_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Parses Modelica code content to extract:
@@ -212,16 +264,17 @@ class LayoutService:
         package_match = re.search(r"\bpackage\s+([A-Za-z_]\w*)", content)
         package_name = package_match.group(1) if package_match else None
 
-        model_matches = re.findall(r"\bmodel\s+([A-Za-z_]\w*)", content)
-        if model_matches:
-            main_model_name = model_matches[-1]
-            full_model_name = f"{package_name}.{main_model_name}" if package_name else main_model_name
-            data["model_name"] = full_model_name
-            cycle_block_pattern = re.compile(rf"((?:within\s+[^;]+;\s*)?model\s+{re.escape(main_model_name)}(.*?)end\s+{re.escape(main_model_name)};)", re.DOTALL | re.IGNORECASE)
-            match_block = cycle_block_pattern.search(content)
-        else:
+        main_model_name = LayoutService.find_main_model_name(content)
+        full_model_name = f"{package_name}.{main_model_name}" if package_name else main_model_name
+        data["model_name"] = full_model_name
+
+        cycle_block_pattern = re.compile(rf"((?:within\s+[^;]+;\s*)?model\s+{re.escape(main_model_name)}(.*?)end\s+{re.escape(main_model_name)};)", re.DOTALL | re.IGNORECASE)
+        match_block = cycle_block_pattern.search(content)
+        if not match_block and main_model_name != "Cycle":
+            # Fallback to Cycle if pattern didn't match
             main_model_name = "Cycle"
-            data["model_name"] = "example_model.Cycle"
+            full_model_name = f"{package_name}.{main_model_name}" if package_name else "example_model.Cycle"
+            data["model_name"] = full_model_name
             cycle_block_pattern = re.compile(r"((?:within\s+[^;]+;\s*)?model\s+Cycle(.*?)end\s+Cycle;)", re.DOTALL | re.IGNORECASE)
             match_block = cycle_block_pattern.search(content)
         
@@ -529,25 +582,29 @@ class LayoutService:
 
         original_comp_count = len(data["components"])
         
-        # Only keep components that are in connected_comp_ids and attach their variables
-        filtered_components = []
-        for comp in data["components"]:
-            if comp["id"] in connected_comp_ids:
-                comp["variables"] = component_variables_map.get(comp["id"], [])
-                filtered_components.append(comp)
-        data["components"] = filtered_components
-        
-        # Filter parameters associated with isolated components
-        data["parameters"] = [
-            p for p in data["parameters"]
-            if p["name"].split('.')[0] in connected_comp_ids
-        ]
+        # Only keep components that are in connected_comp_ids if connections exist, and attach their variables
+        if connected_comp_ids:
+            filtered_components = []
+            for comp in data["components"]:
+                if comp["id"] in connected_comp_ids:
+                    comp["variables"] = component_variables_map.get(comp["id"], [])
+                    filtered_components.append(comp)
+            data["components"] = filtered_components
+            
+            # Filter parameters associated with isolated components
+            data["parameters"] = [
+                p for p in data["parameters"]
+                if p["name"].split('.')[0] in connected_comp_ids
+            ]
 
-        # Filter variables associated with isolated components
-        data["variables"] = [
-            v for v in data["variables"]
-            if v["name"].split('.')[0] in connected_comp_ids
-        ]
+            # Filter variables associated with isolated components
+            data["variables"] = [
+                v for v in data["variables"]
+                if v["name"].split('.')[0] in connected_comp_ids
+            ]
+        else:
+            for comp in data["components"]:
+                comp["variables"] = component_variables_map.get(comp["id"], [])
         
         logger.info(f"Filtered out {original_comp_count - len(data['components'])} isolated components")
         logger.info(f"Parsed structure: {len(data['components'])} components, {len(data['connections'])} connections, {len(data['variables'])} variables")

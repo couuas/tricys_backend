@@ -475,8 +475,7 @@ class ProjectService:
                     package_name = package_match.group(1)
                 else:
                     # Fallback to main model name
-                    model_matches = re.findall(r"\bmodel\s+([A-Za-z_]\w*)", file_content)
-                    package_name = model_matches[-1] if model_matches else "Cycle"
+                    package_name = LayoutService.find_main_model_name(file_content)
                 
                 # 3.2 Extract schema via OMC
                 schema_data = SchemaService.extract_schema(str(model_path), package_name)
